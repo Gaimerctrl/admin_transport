@@ -139,6 +139,13 @@ textarea.input { resize: vertical; min-height: 90px; }
 .chip { padding: 4px 10px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--border); font-size: 13px; }
 .cmt { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; overflow-wrap: anywhere; }
 .cmt:last-child { border-bottom: none; }
+.imp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.imp-table th { text-align: left; padding: 6px 6px; color: var(--muted); font-weight: 600; white-space: nowrap; position: sticky; top: 0; background: var(--panel); }
+.imp-table td { padding: 3px 4px; border-top: 1px solid var(--border); vertical-align: middle; }
+.imp-table select { min-width: 120px; }
+.imp-table input, .imp-table select { width: 100%; min-width: 70px; padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); font-size: 13px; }
+.imp-table .st-ok { color: var(--ok); } .imp-table .st-warn { color: var(--warn); } .imp-table .st-err { color: var(--danger); } .imp-table .st-skip { color: var(--muted); }
+.imp-wrap { max-height: 60vh; overflow: auto; }
 @media (max-width: 860px) {
   #app { flex-direction: column; }
   #side { width: 100%; height: auto; position: static; flex-direction: row; overflow-x: auto; padding: 8px; align-items: center; }
@@ -217,7 +224,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -443,6 +450,7 @@ const PAGES = [
   { id: 'comments', ico: '💬', title: 'Коментарі', min: 'photomod', render: pgComments },
   { id: 'reports', ico: '🚩', title: 'Скарги', min: 'photomod', render: pgReports, badge: 'reports' },
   { id: 'broadcast', ico: '📣', title: 'Оголошення', min: 'admin', render: pgBroadcast },
+  { id: 'import', ico: '📥', title: 'Імпорт транспорту', min: 'admin', render: pgImport },
   { id: 'settings', ico: '⚙️', title: 'Налаштування', min: 'admin', render: pgSettings },
   { id: 'log', ico: '📜', title: 'Журнал', min: 'admin', render: pgLog }
 ];
@@ -1096,6 +1104,299 @@ async function pgSettings(tok) {
       el('div', { class: 'form' },
         el('div', { class: 'sub' }, 'Файл JSON з усіма таблицями (без паролів і пошти). Самі фото лежать у Storage й не входять. Робіть копію регулярно: на безкоштовному тарифі Supabase автоматичних копій немає. Файл містить дані користувачів, зберігайте його надійно.'),
         backupNote, isOwner() ? el('div', null, backupBtn) : el('div', { class: 'sub' }, 'Доступно лише власнику'))));
+}
+
+/* ============================ ІМПОРТ ТРАНСПОРТУ ============================ */
+const IMP_TYPES = [['bus', 'Автобус'], ['trolleybus', 'Тролейбус'], ['tram', 'Трамвай'], ['metro', 'Метро / залізниця'], ['monorail', 'Монорейка'], ['funicular', 'Фунікулер'], ['other', 'Інше']];
+const IMP_STATUSES = [
+  ['active', 'Експлуатується'], ['not_here', 'Не експлуатувався у цьому місті'], ['inactive', 'Не експлуатується'],
+  ['withdrawn', 'Виведений з експлуатації / очікує списання'], ['written_off', 'Списаний'], ['unknown', 'Місцезнаходження і доля невідомі'],
+  ['rebuilt', 'КВР/модернізація'], ['renumbered', 'Перенумеровано/передано'], ['plate_changed', 'Зміна держномера']
+];
+const IMP_COLS = {
+  type: ['тип', 'вид', 'type', 'vehicletype'], fleet: ['борт', 'бортовий', 'бортовий№', '№', 'номер', 'бортовийномер', 'fleet', 'fleetno', 'num'],
+  extra: ['додатковий', 'додатковий№', 'extra', 'extrano', 'extranum'], plate: ['держ', 'держ№', 'держномер', 'держномер№', 'plate', 'plateno', 'gosnum'],
+  model: ['модель', 'model'], factory: ['зав', 'зав№', 'заводський', 'заводський№', 'factory', 'factoryno', 'serial'],
+  year: ['рік', 'рікпобудови', 'ріквипуску', 'побуд', 'year', 'buildyear'], vin: ['vin'],
+  arrived: ['надійшов', 'прибув', 'arrived'], start: ['початок', 'почроб', 'початокроботи', 'початокексплуатації', 'start', 'startdate'],
+  written_off: ['списаний', 'writtenoff', 'decommissioned'], status: ['статус', 'status'], note: ['примітка', 'note'], source: ['джерело', 'source']
+};
+const impState = { rows: [], existing: new Set(), cityId: '', entId: 'new', entName: 'ХКП «Електротранс»', defType: 'trolleybus', expand: true, plateAsFleet: true, enterprises: [] };
+
+function impParseTable(text) {
+  const lines = String(text || '').replace(/^\ufeff/, '').replace(/\r/g, '').split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+  if (lines.length < 2) return [];
+  const count = (d) => lines[0].split(d).length - 1;
+  const delim = ['\t', ';', ','].map(d => [d, count(d)]).sort((a, b) => b[1] - a[1])[0][0];
+  const split = line => {
+    const out = []; let cur = '', q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; }
+      else if (c === '"') q = true;
+      else if (c === delim) { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out.map(x => x.trim());
+  };
+  const norm = h => String(h).toLowerCase().replace(/[^a-zа-яіїєґ0-9№]/g, '');
+  const head = split(lines[0]).map(norm);
+  const map = {};
+  head.forEach((h, i) => { for (const [k, names] of Object.entries(IMP_COLS)) if (names.includes(h) && map[k] == null) map[k] = i; });
+  if (map.fleet == null && map.plate == null) throw new Error('Не знайдено колонку з бортовим номером (Борт / №) у першому рядку');
+  if (map.model == null) throw new Error('Не знайдено колонку «Модель» у першому рядку');
+  return lines.slice(1).map(l => {
+    const c = split(l);
+    const g = k => (map[k] != null ? c[map[k]] || '' : '');
+    return { type: g('type'), fleet: g('fleet'), extra: g('extra'), plate: g('plate'), model: g('model'), factory: g('factory'), year: g('year'),
+      vin: g('vin'), arrived: g('arrived'), start: g('start'), written_off: g('written_off'), status: g('status'), note: g('note') };
+  });
+}
+
+function impType(v, def) {
+  const t = String(v || '').trim().toLowerCase();
+  if (!t) return def;
+  const keys = IMP_TYPES.map(x => x[0]);
+  if (keys.includes(t)) return t;
+  if (/тролейб|троллейб|^тр$/.test(t)) return 'trolleybus';
+  if (/автобус|^а$/.test(t)) return 'bus';
+  if (/трамв|^т$/.test(t)) return 'tram';
+  if (/метро|залізн/.test(t)) return 'metro';
+  if (/монорей/.test(t)) return 'monorail';
+  if (/фунікул/.test(t)) return 'funicular';
+  return def;
+}
+function impStatus(v) {
+  const t = String(v || '').trim().toLowerCase();
+  if (!t) return '';
+  if (IMP_STATUSES.some(x => x[0] === t)) return t;
+  if (/^експлуат|^працю|^діє/.test(t)) return 'active';
+  if (/^не експлуат/.test(t)) return 'inactive';
+  if (/списан/.test(t)) return 'written_off';
+  if (/виведен|очікує/.test(t)) return 'withdrawn';
+  if (/невідом/.test(t)) return 'unknown';
+  if (/квр|модерн/.test(t)) return 'rebuilt';
+  if (/перенумер|переда/.test(t)) return 'renumbered';
+  if (/зміна держ/.test(t)) return 'plate_changed';
+  if (/не експлуатувався/.test(t)) return 'not_here';
+  return '';
+}
+const impYear = v => { const m = String(v || '').match(/(\d{4})\s*$/); return m ? Number(m[1]) : null; };
+
+/* "014-044", "268, 271, 280, 282–287" -> окремі номери (нулі зліва зберігаються) */
+function impExpand(raw, on) {
+  const text = String(raw || '').trim();
+  if (!on || !/[,;–—-]/.test(text)) return [text];
+  const out = [];
+  for (const tok of text.split(/[,;]+/).map(x => x.trim()).filter(Boolean)) {
+    const m = tok.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (m && Number(m[2]) >= Number(m[1]) && Number(m[2]) - Number(m[1]) < 400) {
+      const w = m[1].length;
+      for (let n = Number(m[1]); n <= Number(m[2]); n++) out.push(String(n).padStart(w, '0'));
+    } else out.push(tok);
+  }
+  return out.length ? out : [text];
+}
+
+function impBuildRows(parsed) {
+  const st = impState; const rows = [];
+  parsed.forEach(r => {
+    const fleets = impExpand(r.fleet, st.expand);
+    const multi = fleets.length > 1;
+    fleets.forEach(f => rows.push({
+      type: impType(r.type, st.defType), fleet: f, extra: multi ? '' : r.extra, plate: multi ? '' : r.plate, model: r.model,
+      factory: multi ? '' : r.factory, year: r.year, vin: multi ? '' : r.vin, arrived: r.arrived, start: r.start, written_off: r.written_off,
+      status: impStatus(r.status), note: r.note, done: false
+    }));
+  });
+  if (st.plateAsFleet) rows.forEach(r => { if (!String(r.fleet).trim() && String(r.plate).trim()) r.fleet = r.plate; });
+  return rows;
+}
+const impKey = (f, p, m) => [f, p, m].map(x => String(x == null ? '' : x).trim()).join('|');
+
+function impCheck() {
+  const seen = new Set();
+  impState.rows.forEach(r => {
+    const f = String(r.fleet).trim(), m = String(r.model).trim();
+    r._msg = ''; r._lvl = 'ok';
+    if (r.done) { r._msg = 'імпортовано'; r._lvl = 'skip'; return; }
+    if (!f) { r._msg = 'немає борту'; r._lvl = 'err'; return; }
+    if (!m) { r._msg = 'немає моделі'; r._lvl = 'err'; return; }
+    if (r.year && !(Number(r.year) >= 1900 && Number(r.year) <= 2100)) { r._msg = 'рік?'; r._lvl = 'err'; return; }
+    const k = impKey(f, r.plate, m);
+    if (impState.existing.has(k)) { r._msg = 'вже є в базі'; r._lvl = 'skip'; return; }
+    if (seen.has(k)) { r._msg = 'дубль у списку'; r._lvl = 'skip'; return; }
+    seen.add(k);
+    if (!r.status) { r._msg = 'статус не вказано → «Експлуатується»'; r._lvl = 'warn'; }
+  });
+}
+
+async function pgImport(tok) {
+  const st = impState;
+  const { data: cityList } = await db.from('cities').select('id, name, country').order('name');
+  if (stale(tok)) return;
+  const cities = cityList || [];
+  if (!st.cityId) { const h = cities.find(c => /хмельницьк/i.test(c.name)); st.cityId = h ? h.id : (cities[0] ? cities[0].id : ''); }
+
+  const citySel = el('select', { class: 'input' }, ...cities.map(c => el('option', { value: c.id, selected: c.id === st.cityId }, c.name + (c.country ? ' · ' + c.country : ''))));
+  const entSel = el('select', { class: 'input' });
+  const entName = el('input', { class: 'input', placeholder: 'Назва нового підприємства', value: st.entName });
+  const defType = el('select', { class: 'input', style: 'max-width:200px' }, ...IMP_TYPES.map(([k, l]) => el('option', { value: k, selected: st.defType === k }, l)));
+  const chkExpand = el('input', { type: 'checkbox', checked: st.expand });
+  const chkPlate = el('input', { type: 'checkbox', checked: st.plateAsFleet });
+  const area = el('textarea', { class: 'input', rows: 8, placeholder: 'Вставте таблицю з Excel / Google Sheets разом із заголовками колонок…' });
+  const fileIn = el('input', { type: 'file', accept: '.csv,.tsv,.txt,text/csv,text/plain' });
+  const msg = el('div', { class: 'err' });
+  const preview = el('div');
+
+  async function loadEnts() {
+    st.cityId = citySel.value;
+    const { data } = await db.from('enterprises').select('id, name, transport_types').eq('city_id', st.cityId).order('name');
+    st.enterprises = data || [];
+    const pref = st.enterprises.find(e => /електротранс/i.test(e.name));
+    st.entId = pref ? pref.id : 'new';
+    entSel.replaceChildren(...st.enterprises.map(e => el('option', { value: e.id, selected: e.id === st.entId }, e.name)), el('option', { value: 'new', selected: st.entId === 'new' }, '➕ Створити нове підприємство…'));
+    syncEnt();
+  }
+  async function syncEnt() {
+    st.entId = entSel.value;
+    entName.classList.toggle('hidden', st.entId !== 'new');
+    st.existing = new Set();
+    if (st.entId !== 'new') {
+      for (let from = 0; ; from += 1000) {
+        const { data } = await db.from('vehicles').select('fleet_no, plate_no, model').eq('enterprise_id', st.entId).range(from, from + 999);
+        (data || []).forEach(v => st.existing.add(impKey(v.fleet_no, v.plate_no, v.model)));
+        if (!data || data.length < 1000) break;
+      }
+    }
+    drawPreview();
+  }
+  citySel.addEventListener('change', loadEnts);
+  entSel.addEventListener('change', syncEnt);
+  entName.addEventListener('input', () => { st.entName = entName.value; });
+  defType.addEventListener('change', () => { st.defType = defType.value; });
+  chkExpand.addEventListener('change', () => { st.expand = chkExpand.checked; });
+  chkPlate.addEventListener('change', () => { st.plateAsFleet = chkPlate.checked; });
+
+  let parsedCache = [];
+  function readText(text) {
+    msg.style.color = '';
+    try {
+      parsedCache = impParseTable(text);
+      if (!parsedCache.length) { msg.textContent = 'У даних немає рядків (потрібні заголовок і хоча б один рядок)'; st.rows = []; drawPreview(); return; }
+      st.rows = impBuildRows(parsedCache);
+      msg.textContent = '';
+      drawPreview();
+    } catch (e) { msg.textContent = e.message; }
+  }
+  const readBtn = el('button', { class: 'btn primary', type: 'button', onclick: () => readText(area.value) }, 'Прочитати дані');
+  fileIn.addEventListener('change', async () => { const f = fileIn.files[0]; if (f) { area.value = await f.text(); readText(area.value); } });
+
+  function drawPreview() {
+    impCheck();
+    const rows = st.rows;
+    const cnt = k => rows.filter(r => r._lvl === k).length;
+    const ready = rows.filter(r => r._lvl === 'ok' || r._lvl === 'warn').length;
+    const sumText = () => 'Рядків: ' + rows.length + ' · готово до імпорту: ' + (cnt('ok') + cnt('warn')) + ' · пропущено: ' + cnt('skip') + ' · помилок: ' + cnt('err') + (cnt('warn') ? ' · зі статусом за замовчуванням: ' + cnt('warn') : '');
+    const sum = el('div', { class: 'sub', style: 'padding:10px 16px' }, sumText());
+    const importBtn = el('button', { class: 'btn ok', type: 'button', disabled: !ready || cnt('err') > 0 }, ready ? '📥 Імпортувати ' + ready + ' ТЗ' : 'Нічого імпортувати');
+    importBtn.addEventListener('click', () => impRun(importBtn, msg, drawPreview));
+    const cell = (r, key, w) => { const i = el('input', { value: r[key] == null ? '' : r[key], style: w ? 'min-width:' + w + 'px' : '' }); i.addEventListener('input', () => { r[key] = i.value; impCheck(); refreshBadges2(); }); return i; };
+    const selCell = (r, key, opts, blank) => { const sl = el('select', null, ...(blank ? [el('option', { value: '' }, blank)] : []), ...opts.map(([k, l]) => el('option', { value: k, selected: r[key] === k }, l))); sl.addEventListener('change', () => { r[key] = sl.value; impCheck(); refreshBadges2(); }); return sl; };
+    const badges = [];
+    function refreshBadges2() {
+      badges.forEach(([b, r]) => { b.textContent = r._msg || '✔'; b.className = 'st-' + r._lvl; });
+      sum.textContent = sumText();
+      const ready2 = st.rows.filter(r => r._lvl === 'ok' || r._lvl === 'warn').length, errs = st.rows.filter(r => r._lvl === 'err').length;
+      importBtn.disabled = !ready2 || errs > 0; importBtn.textContent = ready2 ? '📥 Імпортувати ' + ready2 + ' ТЗ' : 'Нічого імпортувати';
+    }
+    const table = el('table', { class: 'imp-table' },
+      el('thead', null, el('tr', null, ...['#', 'Тип', 'Борт', 'Держ. №', 'Модель', 'Зав. №', 'Рік', 'VIN', 'Надійшов', 'Початок', 'Списаний', 'Статус', 'Примітка', 'Перевірка', ''].map(h => el('th', null, h)))),
+      el('tbody', null, ...rows.map((r, i) => {
+        const b = el('span'); badges.push([b, r]); b.textContent = r._msg || '✔'; b.className = 'st-' + r._lvl;
+        return el('tr', null, el('td', null, i + 1), el('td', null, selCell(r, 'type', IMP_TYPES)), el('td', null, cell(r, 'fleet', 70)), el('td', null, cell(r, 'plate', 90)),
+          el('td', null, cell(r, 'model', 130)), el('td', null, cell(r, 'factory', 60)), el('td', null, cell(r, 'year', 56)), el('td', null, cell(r, 'vin', 150)),
+          el('td', null, cell(r, 'arrived', 80)), el('td', null, cell(r, 'start', 80)), el('td', null, cell(r, 'written_off', 80)),
+          el('td', null, selCell(r, 'status', IMP_STATUSES, '— не вказано —')), el('td', null, cell(r, 'note', 120)), el('td', null, b),
+          el('td', null, el('button', { class: 'btn small', type: 'button', title: 'Прибрати рядок', onclick: () => { st.rows.splice(i, 1); drawPreview(); } }, '✕')));
+      })));
+    const bulkSel = el('select', { class: 'input', style: 'max-width:300px' }, ...IMP_STATUSES.map(([k, l]) => el('option', { value: k }, l)));
+    const bulkBtn = el('button', { class: 'btn small', type: 'button', onclick: () => { rows.forEach(r => { if (!r.status && !r.done) r.status = bulkSel.value; }); drawPreview(); } }, 'Призначити цей статус рядкам без статусу');
+    const bulkBar = el('div', { class: 'toolbar', style: 'padding:0 16px 10px;margin:0' }, el('span', { class: 'sub' }, 'Швидко:'), bulkSel, bulkBtn);
+    preview.replaceChildren(...[
+      rows.length ? sum : null,
+      rows.length ? bulkBar : null,
+      rows.length ? el('div', { class: 'imp-wrap' }, table) : null,
+      rows.length ? el('div', { style: 'padding:12px 16px' }, importBtn) : null
+    ].filter(Boolean));
+  }
+
+  show(
+    el('div', { class: 'panel' }, el('h3', null, '1. Куди імпортувати'),
+      el('div', { class: 'form' }, el('label', null, 'Місто'), citySel, el('label', null, 'Підприємство'), entSel, entName,
+        el('label', { class: 'sub' }, 'Тип за замовчуванням (якщо в рядку не вказано)'), defType)),
+    el('div', { class: 'panel' }, el('h3', null, '2. Дані'),
+      el('div', { class: 'form' },
+        el('div', { class: 'sub' }, 'Перший рядок: назви колонок (Тип, Борт, Держ. №, Модель, Зав. №, Рік, VIN, Надійшов, Початок, Списаний, Статус, Примітка). Рядки, що починаються з #, ігноруються.'),
+        area, el('div', { class: 'toolbar', style: 'margin:0' }, el('span', { class: 'sub' }, 'або файл:'), fileIn),
+        el('label', { style: 'display:flex;gap:8px;align-items:center' }, chkExpand, 'Розгортати діапазони та списки в колонці «Борт» (014-044; 268, 271, 282–287)'),
+        el('label', { style: 'display:flex;gap:8px;align-items:center' }, chkPlate, 'Якщо борт не вказано, брати держномер'),
+        msg, el('div', null, readBtn))),
+    el('div', { class: 'panel' }, el('h3', null, '3. Перевірка й імпорт'), preview));
+  await loadEnts();
+}
+
+async function impRun(btn, msg, redraw) {
+  const st = impState;
+  const todo = st.rows.filter(r => r._lvl === 'ok' || r._lvl === 'warn');
+  if (!todo.length) return;
+  const city = (await db.from('cities').select('id, name').eq('id', st.cityId).maybeSingle()).data;
+  let entId = st.entId, entTitle = '';
+  const types = [...new Set(todo.map(r => r.type))].slice(0, 5);
+  const ok = await askConfirm('Імпортувати ' + todo.length + ' ТЗ?', 'Місто: ' + (city ? city.name : '—') + '. ' + (entId === 'new' ? 'Буде створено підприємство «' + st.entName.trim() + '».' : 'Додаємо в наявне підприємство.'), 'Імпортувати', false);
+  if (!ok) return;
+  btn.disabled = true; msg.style.color = '';
+  try {
+    if (entId === 'new') {
+      const name = st.entName.trim();
+      if (!name) throw new Error('Вкажіть назву підприємства');
+      msg.textContent = 'Створюю підприємство…';
+      const r = await db.from('enterprises').insert({ city_id: st.cityId, owner_id: me.id, name, transport_types: types, status: 'active' }).select('id').single();
+      if (r.error) throw r.error;
+      entId = r.data.id; entTitle = name;
+    } else {
+      const e = st.enterprises.find(x => x.id === entId);
+      entTitle = e ? e.name : '';
+      const merged = [...new Set([...(e && e.transport_types || []), ...types])].slice(0, 5);
+      if (e && merged.length !== (e.transport_types || []).length) {
+        const err = await upd('enterprises', { transport_types: merged }, entId);
+        if (err) throw new Error(err);
+        e.transport_types = merged;
+      }
+    }
+    const t = v => String(v == null ? '' : v).trim() || null;
+    const rows = todo.map(r => ({
+      city_id: st.cityId, enterprise_id: entId, owner_id: me.id, fleet_no: String(r.fleet).trim(), extra_no: t(r.extra), plate_no: t(r.plate),
+      vehicle_type: r.type, model: String(r.model).trim(), factory_no: t(r.factory), build_year: impYear(r.year), vin: t(r.vin),
+      start_date: t(r.start), arrived: t(r.arrived), written_off: t(r.written_off), status: r.status || 'active', note: t(r.note)
+    }));
+    let done = 0;
+    for (let i = 0; i < rows.length; i += 50) {
+      msg.textContent = 'Імпортую… ' + done + ' з ' + rows.length;
+      const { error } = await db.from('vehicles').insert(rows.slice(i, i + 50));
+      if (error) throw new Error(error.message + ' (імпортовано ' + done + ')');
+      todo.slice(i, i + 50).forEach(r => { r.done = true; st.existing.add(impKey(r.fleet, r.plate, r.model)); });
+      done += Math.min(50, rows.length - i);
+    }
+    await logAction('import_vehicles', city ? city.name : null, done + ' ТЗ у «' + entTitle + '»');
+    msg.style.color = 'var(--ok)'; msg.textContent = 'Готово: імпортовано ' + done + ' ТЗ у «' + entTitle + '»';
+    if (st.entId === 'new') { st.entId = entId; }
+    toast('Імпортовано ТЗ: ' + done);
+  } catch (e) {
+    msg.textContent = 'Помилка: ' + (e.message || e);
+  }
+  redraw();
 }
 
 /* ============================ ОГОЛОШЕННЯ ============================ */
