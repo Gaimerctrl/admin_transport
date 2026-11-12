@@ -217,7 +217,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -238,6 +238,7 @@ function el(tag, attrs, ...kids) {
 const fmtDate = s => s ? new Date(s).toLocaleString('uk-UA', { dateStyle: 'short', timeStyle: 'short' }) : '—';
 const escLike = s => String(s).replace(/[%_\\]/g, '\\$&');
 const phUrl = p => db.storage.from('photos').getPublicUrl(p.path).data.publicUrl;
+const phThumb = p => (p.thumb_path ? db.storage.from('photos').getPublicUrl(p.thumb_path).data.publicUrl : phUrl(p));
 const userLink = (id, name) => el('a', { href: SITE_URL + '#user=' + id, target: '_blank', rel: 'noopener' }, name || '—');
 
 function toast(msg, kind) {
@@ -309,6 +310,22 @@ async function dailySeries(table, days) {
     out.push({ key: d.toDateString(), label: d.getDate(), title: d.toLocaleDateString('uk-UA'), n: 0 });
   }
   (data || []).forEach(r => { const k = new Date(r.created_at).toDateString(); const b = out.find(x => x.key === k); if (b) b.n++; });
+  return out;
+}
+async function visitsSeries(days) {
+  const since = new Date();
+  since.setHours(0, 0, 0, 0);
+  since.setDate(since.getDate() - (days - 1));
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const { data, error } = await db.from('site_stats').select('day, views').gte('day', iso(since)).order('day');
+  if (error) return null;                      // таблиці ще немає (features2.sql не виконано)
+  const byDay = {};
+  (data || []).forEach(r => { byDay[r.day] = r.views; });
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(since); d.setDate(since.getDate() + i);
+    out.push({ label: d.getDate(), title: d.toLocaleDateString('uk-UA'), n: byDay[iso(d)] || 0 });
+  }
   return out;
 }
 function chartPanel(title, series) {
@@ -492,7 +509,7 @@ async function pgOverview(tok) {
     db.from('staff_log').select('*').order('created_at', { ascending: false }).limit(8),
     db.from('profiles').select('id, username, avatar_url, role, created_at').order('created_at', { ascending: false }).limit(8)
   ]);
-  const [serU, serP] = await Promise.all([dailySeries('profiles', 14), dailySeries('photos', 14)]);
+  const [serU, serP, serV] = await Promise.all([dailySeries('profiles', 14), dailySeries('photos', 14), visitsSeries(14)]);
   if (stale(tok)) return;
   const stat = (n, label, warn) => el('div', { class: 'stat' + (warn && n ? ' warn' : '') }, el('b', null, n == null ? '—' : n.toLocaleString('uk-UA')), el('span', null, label));
   const logRows = (logRes.data || []).map(x => el('div', { class: 'row' },
@@ -506,6 +523,7 @@ async function pgOverview(tok) {
       stat(users, 'Користувачів'), stat(banned, 'Заблоковано'), stat(cPub, 'Міст опубліковано'),
       stat(cPend, 'Міст на модерації', true), stat(cDraft, 'Чернеток міст'), stat(phOk, 'Фото схвалено'),
       stat(phPend, 'Фото на модерації', true), stat(repOpen, 'Скарг відкрито', true), stat(cmts, 'Коментарів')),
+    serV ? chartPanel('Відвідування сайту, 14 днів', serV) : null,
     el('div', { class: 'cols' }, chartPanel('Нові користувачі, 14 днів', serU), chartPanel('Нові фото, 14 днів', serP)),
     el('div', { class: 'cols' },
       el('div', { class: 'panel' }, el('h3', null, 'Останні дії персоналу'), logRows.length ? logRows : el('div', { class: 'empty' }, 'Поки порожньо')),
@@ -775,6 +793,7 @@ async function pgPhotos(tok) {
   bulkBtn.addEventListener('click', () => bulkApprove(items.filter(p => st.sel.has(p.id))));
   const cards = items.map(p => {
     const url = phUrl(p);
+    const thumbUrl = phThumb(p);
     const a = authors[p.owner_id];
     const acts = el('div', { class: 'acts' });
     if (p.status === 'pending') acts.append(
@@ -784,7 +803,7 @@ async function pgPhotos(tok) {
     const pick = p.status === 'pending' ? el('label', { class: 'pick', title: 'Вибрати' },
       el('input', { type: 'checkbox', checked: st.sel.has(p.id), onchange: e => { e.target.checked ? st.sel.add(p.id) : st.sel.delete(p.id); refreshBulk(); } })) : null;
     return el('div', { class: 'pcard' }, pick,
-      el('img', { class: 'ph', src: url, loading: 'lazy', alt: '', onclick: () => openLightbox(url) }),
+      el('img', { class: 'ph', src: thumbUrl, loading: 'lazy', alt: '', onclick: () => openLightbox(url) }),
       el('div', { class: 'body' },
         el('p', null, el('b', null, (p.city_name || '—') + ' · ' + (p.enterprise_name || '—'))),
         el('p', { class: 'sub' }, [p.fleet_no && 'Борт ' + p.fleet_no, p.model, p.plate_no].filter(Boolean).join(' · ') || '—'),
@@ -830,7 +849,7 @@ async function photoReject(p, title, okLabel) {
   if (reason == null) return;
   const err = await del('photos', p.id);
   if (err) { toast(err, 'err'); return; }
-  try { await db.storage.from('photos').remove([p.path]); } catch (e) { /* файл можна прибрати пізніше */ }
+  try { await db.storage.from('photos').remove([p.path, p.thumb_path].filter(Boolean)); } catch (e) { /* файл можна прибрати пізніше */ }
   await logAction('photo_reject', p.city_name, reason);
   await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» відхилено. Причина: ' + reason);
   toast('Фото видалено'); refreshBadges(); pgPhotos(++renderTok);
@@ -895,7 +914,7 @@ async function pgReports(tok) {
   const chunk = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };
   const photos = {}, comments = {};
   for (const part of chunk(list.filter(g => g.type === 'photo').map(g => g.id), 100)) {
-    const r = await db.from('photos').select('id, owner_id, owner_name, city_name, enterprise_name, path, status').in('id', part);
+    const r = await db.from('photos').select('*').in('id', part);
     (r.data || []).forEach(x => { photos[x.id] = x; });
   }
   for (const part of chunk(list.filter(g => g.type === 'comment').map(g => g.id), 100)) {
@@ -915,6 +934,7 @@ async function pgReports(tok) {
     g.reports.forEach(r => { counts[r.reason] = (counts[r.reason] || 0) + 1; });
     const summary = Object.entries(counts).map(([k, n]) => (REASONS[k] || k) + (n > 1 ? ' ×' + n : '')).join(', ');
     const url = g.type === 'photo' && target ? phUrl(target) : null;
+    const turl = g.type === 'photo' && target ? phThumb(target) : null;
     const who = target ? el('p', { class: 'sub' }, 'Автор: ', userLink(target.owner_id, target.owner_name)) : null;
     const body = target
       ? (g.type === 'photo'
@@ -932,7 +952,7 @@ async function pgReports(tok) {
         el('button', { class: 'btn small ok', onclick: () => reportClose(g, 'resolved') }, 'Розглянуто'));
     }
     return el('div', { class: 'row', style: 'align-items:flex-start' },
-      url ? el('img', { class: 'thumb', style: 'width:96px;height:72px', src: url, loading: 'lazy', alt: '', onclick: () => openLightbox(url) }) : null,
+      url ? el('img', { class: 'thumb', style: 'width:96px;height:72px', src: turl, loading: 'lazy', alt: '', onclick: () => openLightbox(url) }) : null,
       el('div', { class: 'info' }, body, who,
         el('p', { class: 'sub' }, el('span', { class: 'tag ban' }, g.reports.length + ' скарг'), ' ' + summary + ' · ' + fmtDate(g.reports[0].created_at)),
         ...details),
@@ -960,7 +980,7 @@ async function reportDeleteTarget(g, t) {
   if (g.type === 'photo') {
     err = await del('photos', t.id);
     if (!err) {
-      try { await db.storage.from('photos').remove([t.path]); } catch (e) { /* ignore */ }
+      try { await db.storage.from('photos').remove([t.path, t.thumb_path].filter(Boolean)); } catch (e) { /* ignore */ }
       await logAction('photo_reject', t.city_name, 'скарга: ' + reason);
       await notify(t.owner_id, 'Ваше фото (' + (t.enterprise_name || '') + ') у місті «' + (t.city_name || '') + '» видалено за скаргою. Причина: ' + reason);
     }
@@ -1031,6 +1051,37 @@ async function pgSettings(tok) {
     drawWords([...(chips._words || []), { word: w }].sort((a, b) => a.word.localeCompare(b.word)));
   });
 
+  const backupNote = el('div', { class: 'err' });
+  const backupBtn = el('button', { class: 'btn', type: 'button', disabled: !isOwner() }, '💾 Завантажити резервну копію бази');
+  backupBtn.addEventListener('click', async () => {
+    backupBtn.disabled = true; backupNote.style.color = '';
+    try {
+      const names = ['profiles', 'cities', 'enterprises', 'vehicles', 'routes', 'photos', 'photo_comments', 'photo_votes',
+        'albums', 'album_photos', 'follows', 'favorites', 'city_editors', 'reports', 'banned_words', 'site_settings', 'staff_log'];
+      const out = { exported_at: new Date().toISOString(), note: 'Файли фото зберігаються окремо в Supabase Storage (шляхи є в таблиці photos).', tables: {} };
+      for (const t of names) {
+        backupNote.textContent = 'Експорт: ' + t + '…';
+        const rows = [];
+        let failed = null;
+        for (let from = 0; ; from += 1000) {
+          const { data, error } = await db.from(t).select('*').range(from, from + 999);
+          if (error) { failed = error.message; break; }
+          rows.push(...data);
+          if (data.length < 1000) break;
+        }
+        out.tables[t] = failed ? { error: failed } : rows;
+      }
+      const a = el('a', { href: URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' })), download: 'backup-' + new Date().toISOString().slice(0, 10) + '.json' });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      await logAction('backup', null, Object.entries(out.tables).map(([k, v]) => k + ':' + (Array.isArray(v) ? v.length : 'помилка')).join(', '));
+      backupNote.style.color = 'var(--ok)'; backupNote.textContent = 'Готово: файл завантажено';
+    } catch (e) {
+      backupNote.textContent = String(e.message || e);
+    }
+    backupBtn.disabled = false;
+  });
+
   show(
     el('div', { class: 'panel' }, el('h3', null, '🛠️ Режим технічних робіт'),
       el('div', { class: 'form' },
@@ -1040,7 +1091,11 @@ async function pgSettings(tok) {
       el('div', { class: 'form' },
         el('div', { class: 'sub' }, 'Коментар із таким словом (як частиною тексту, без урахування регістру) не буде опубліковано. Персонал не обмежується.'),
         el('div', { class: 'toolbar', style: 'margin:0' }, wordInput, addWord), wordNote),
-      wordsRes.error ? el('div', { class: 'empty' }, wordsRes.error.message) : chips));
+      wordsRes.error ? el('div', { class: 'empty' }, wordsRes.error.message) : chips),
+    el('div', { class: 'panel' }, el('h3', null, '💾 Резервна копія'),
+      el('div', { class: 'form' },
+        el('div', { class: 'sub' }, 'Файл JSON з усіма таблицями (без паролів і пошти). Самі фото лежать у Storage й не входять. Робіть копію регулярно: на безкоштовному тарифі Supabase автоматичних копій немає. Файл містить дані користувачів, зберігайте його надійно.'),
+        backupNote, isOwner() ? el('div', null, backupBtn) : el('div', { class: 'sub' }, 'Доступно лише власнику'))));
 }
 
 /* ============================ ОГОЛОШЕННЯ ============================ */
