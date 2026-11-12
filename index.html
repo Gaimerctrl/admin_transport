@@ -215,7 +215,9 @@ const LOG_LABELS = {
   approve: 'прийняв місто', reject: 'відхилив місто', unpublish: 'зняв з публікації місто', delete: 'видалив місто',
   broadcast: 'надіслав оголошення', ban: 'заблокував акаунт', unban: 'розблокував акаунт',
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
-  set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар'
+  set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
+  report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -422,7 +424,9 @@ const PAGES = [
   { id: 'cities', ico: '🏙️', title: 'Міста', min: 'admin', render: pgCities, badge: 'cities' },
   { id: 'photos', ico: '📷', title: 'Фото', min: 'photomod', render: pgPhotos, badge: 'photos' },
   { id: 'comments', ico: '💬', title: 'Коментарі', min: 'photomod', render: pgComments },
+  { id: 'reports', ico: '🚩', title: 'Скарги', min: 'photomod', render: pgReports, badge: 'reports' },
   { id: 'broadcast', ico: '📣', title: 'Оголошення', min: 'admin', render: pgBroadcast },
+  { id: 'settings', ico: '⚙️', title: 'Налаштування', min: 'admin', render: pgSettings },
   { id: 'log', ico: '📜', title: 'Журнал', min: 'admin', render: pgLog }
 ];
 const allowed = p => RANK[me.role] >= RANK[p.min];
@@ -455,13 +459,16 @@ async function refreshBadges(announce) {
   const set = (id, n) => { const b = $(id); if (!b) return; b.textContent = n || ''; b.classList.toggle('hidden', !n); };
   const c = isAdmin() ? await count('cities', q => q.eq('submitted', true).eq('is_published', false)) : 0;
   const p = await count('photos', q => q.eq('status', 'pending'));
-  set('nb-cities', c); set('nb-photos', p);
-  document.title = ((c || 0) + (p || 0) ? '(' + ((c || 0) + (p || 0)) + ') ' : '') + 'Адмін-панель';
+  const r = await count('reports', q => q.eq('status', 'open'));
+  set('nb-cities', c); set('nb-photos', p); set('nb-reports', r);
+  const total = (c || 0) + (p || 0) + (r || 0);
+  document.title = (total ? '(' + total + ') ' : '') + 'Адмін-панель';
   if (announce && lastCounts) {
     if (p > lastCounts.p) toast('📷 Нових фото на модерації: ' + (p - lastCounts.p));
     if (c > lastCounts.c) toast('🏙️ Нових міст на модерації: ' + (c - lastCounts.c));
+    if (r > lastCounts.r) toast('🚩 Нових скарг: ' + (r - lastCounts.r));
   }
-  lastCounts = { c: c || 0, p: p || 0 };
+  lastCounts = { c: c || 0, p: p || 0, r: r || 0 };
 }
 setInterval(() => { if (me && !document.hidden) refreshBadges(true); }, 45000);
 document.addEventListener('visibilitychange', () => { if (me && !document.hidden) refreshBadges(true); });
@@ -480,6 +487,7 @@ async function pgOverview(tok) {
     count('photos', q => q.eq('status', 'pending')),
     count('photo_comments')
   ]);
+  const repOpen = await count('reports', q => q.eq('status', 'open'));
   const [logRes, usrRes] = await Promise.all([
     db.from('staff_log').select('*').order('created_at', { ascending: false }).limit(8),
     db.from('profiles').select('id, username, avatar_url, role, created_at').order('created_at', { ascending: false }).limit(8)
@@ -497,7 +505,7 @@ async function pgOverview(tok) {
     el('div', { class: 'cards' },
       stat(users, 'Користувачів'), stat(banned, 'Заблоковано'), stat(cPub, 'Міст опубліковано'),
       stat(cPend, 'Міст на модерації', true), stat(cDraft, 'Чернеток міст'), stat(phOk, 'Фото схвалено'),
-      stat(phPend, 'Фото на модерації', true), stat(cmts, 'Коментарів')),
+      stat(phPend, 'Фото на модерації', true), stat(repOpen, 'Скарг відкрито', true), stat(cmts, 'Коментарів')),
     el('div', { class: 'cols' }, chartPanel('Нові користувачі, 14 днів', serU), chartPanel('Нові фото, 14 днів', serP)),
     el('div', { class: 'cols' },
       el('div', { class: 'panel' }, el('h3', null, 'Останні дії персоналу'), logRows.length ? logRows : el('div', { class: 'empty' }, 'Поки порожньо')),
@@ -863,6 +871,176 @@ async function commentDelete(c) {
   if (err) { toast(err, 'err'); return; }
   await logAction('comment_delete', null, (c.owner_name || '') + ': ' + String(c.body).slice(0, 120));
   toast('Коментар видалено'); pgComments(++renderTok);
+}
+
+/* ============================ СКАРГИ ============================ */
+const reportsState = { tab: 'open' };
+const REASONS = { spam: 'Спам', inappropriate: 'Неприйнятний вміст', copyright: 'Авторські права', other: 'Інше' };
+
+async function pgReports(tok) {
+  const st = reportsState;
+  const base = db.from('reports').select('*');
+  const [cOpen, res] = await Promise.all([
+    count('reports', q => q.eq('status', 'open')),
+    (st.tab === 'open' ? base.eq('status', 'open') : base.neq('status', 'open'))
+      .order('created_at', { ascending: st.tab === 'open' }).limit(200)
+  ]);
+  const groups = new Map();
+  (res.data || []).forEach(r => {
+    const k = r.target_type + ':' + r.target_id;
+    if (!groups.has(k)) groups.set(k, { type: r.target_type, id: r.target_id, reports: [] });
+    groups.get(k).reports.push(r);
+  });
+  const list = [...groups.values()];
+  const chunk = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };
+  const photos = {}, comments = {};
+  for (const part of chunk(list.filter(g => g.type === 'photo').map(g => g.id), 100)) {
+    const r = await db.from('photos').select('id, owner_id, owner_name, city_name, enterprise_name, path, status').in('id', part);
+    (r.data || []).forEach(x => { photos[x.id] = x; });
+  }
+  for (const part of chunk(list.filter(g => g.type === 'comment').map(g => g.id), 100)) {
+    const r = await db.from('photo_comments').select('id, owner_id, owner_name, body, photo_id').in('id', part);
+    (r.data || []).forEach(x => { comments[x.id] = x; });
+  }
+  const reporters = await usersMap((res.data || []).map(r => r.reporter_id));
+  if (stale(tok)) return;
+
+  const tabs = el('div', { class: 'tabs' },
+    el('button', { class: 'tab' + (st.tab === 'open' ? ' active' : ''), onclick: () => { st.tab = 'open'; pgReports(++renderTok); } }, 'Відкриті' + (cOpen != null ? ' (' + cOpen + ')' : '')),
+    el('button', { class: 'tab' + (st.tab === 'closed' ? ' active' : ''), onclick: () => { st.tab = 'closed'; pgReports(++renderTok); } }, 'Розглянуті'));
+
+  const rows = list.map(g => {
+    const target = g.type === 'photo' ? photos[g.id] : comments[g.id];
+    const counts = {};
+    g.reports.forEach(r => { counts[r.reason] = (counts[r.reason] || 0) + 1; });
+    const summary = Object.entries(counts).map(([k, n]) => (REASONS[k] || k) + (n > 1 ? ' ×' + n : '')).join(', ');
+    const url = g.type === 'photo' && target ? phUrl(target) : null;
+    const who = target ? el('p', { class: 'sub' }, 'Автор: ', userLink(target.owner_id, target.owner_name)) : null;
+    const body = target
+      ? (g.type === 'photo'
+        ? el('p', null, el('b', null, '📷 ' + (target.city_name || '—') + ' · ' + (target.enterprise_name || '—')))
+        : el('p', { style: 'white-space:pre-wrap;overflow-wrap:anywhere' }, el('b', null, '💬 '), target.body))
+      : el('p', { class: 'sub' }, 'Контент уже видалено');
+    const details = g.reports.slice(0, 4).map(r => el('p', { class: 'sub' },
+      '• ', (reporters[r.reporter_id] || {}).username || '—', ': ', REASONS[r.reason] || r.reason, r.details ? ' — ' + r.details : '',
+      r.status !== 'open' ? ' [' + (r.status === 'resolved' ? 'розглянуто' : 'відхилено') + ']' : ''));
+    const acts = el('div', { class: 'acts' });
+    if (st.tab === 'open') {
+      if (target) acts.append(el('button', { class: 'btn small danger', onclick: () => reportDeleteTarget(g, target) }, 'Видалити контент'));
+      acts.append(
+        el('button', { class: 'btn small', onclick: () => reportClose(g, 'dismissed') }, 'Відхилити скаргу'),
+        el('button', { class: 'btn small ok', onclick: () => reportClose(g, 'resolved') }, 'Розглянуто'));
+    }
+    return el('div', { class: 'row', style: 'align-items:flex-start' },
+      url ? el('img', { class: 'thumb', style: 'width:96px;height:72px', src: url, loading: 'lazy', alt: '', onclick: () => openLightbox(url) }) : null,
+      el('div', { class: 'info' }, body, who,
+        el('p', { class: 'sub' }, el('span', { class: 'tag ban' }, g.reports.length + ' скарг'), ' ' + summary + ' · ' + fmtDate(g.reports[0].created_at)),
+        ...details),
+      acts);
+  });
+  show(tabs, el('div', { class: 'panel' }, res.error ? el('div', { class: 'empty' }, res.error.message) : rows.length ? rows : el('div', { class: 'empty' }, 'Скарг немає 🎉')));
+}
+
+async function closeReports(g, status) {
+  const { error } = await db.from('reports').update({ status, resolved_by: me.id, resolved_at: new Date().toISOString() })
+    .eq('target_type', g.type).eq('target_id', g.id).eq('status', 'open').select('id');
+  return error ? error.message : '';
+}
+async function reportClose(g, status) {
+  const err = await closeReports(g, status);
+  if (err) { toast(err, 'err'); return; }
+  await logAction(status === 'dismissed' ? 'report_dismiss' : 'report_resolve', null, (g.type === 'photo' ? 'фото ' : 'коментар ') + g.id.slice(0, 8));
+  toast(status === 'dismissed' ? 'Скаргу відхилено' : 'Скаргу закрито');
+  refreshBadges(); pgReports(++renderTok);
+}
+async function reportDeleteTarget(g, t) {
+  const reason = await askReason('Причина видалення', 'Видалити контент');
+  if (reason == null) return;
+  let err;
+  if (g.type === 'photo') {
+    err = await del('photos', t.id);
+    if (!err) {
+      try { await db.storage.from('photos').remove([t.path]); } catch (e) { /* ignore */ }
+      await logAction('photo_reject', t.city_name, 'скарга: ' + reason);
+      await notify(t.owner_id, 'Ваше фото (' + (t.enterprise_name || '') + ') у місті «' + (t.city_name || '') + '» видалено за скаргою. Причина: ' + reason);
+    }
+  } else {
+    err = await del('photo_comments', t.id);
+    if (!err) {
+      await logAction('comment_delete', null, (t.owner_name || '') + ': ' + String(t.body).slice(0, 100) + ' (скарга: ' + reason + ')');
+      await notify(t.owner_id, 'Ваш коментар видалено за скаргою. Причина: ' + reason);
+    }
+  }
+  if (err) { toast(err, 'err'); return; }
+  const e2 = await closeReports(g, 'resolved');
+  if (e2) toast(e2, 'err');
+  toast('Контент видалено, скаргу закрито');
+  refreshBadges(); pgReports(++renderTok);
+}
+
+/* ============================ НАЛАШТУВАННЯ ============================ */
+async function pgSettings(tok) {
+  const [setRes, wordsRes] = await Promise.all([
+    db.from('site_settings').select('value').eq('key', 'maintenance').maybeSingle(),
+    db.from('banned_words').select('*').order('word')
+  ]);
+  if (stale(tok)) return;
+  const cur = (setRes.data && setRes.data.value) || { on: false, message: '' };
+
+  /* режим техробіт: змінює лише власник */
+  const on = el('input', { type: 'checkbox', checked: !!cur.on, disabled: !isOwner() });
+  const msg = el('textarea', { class: 'input', rows: 3, placeholder: 'Текст для відвідувачів (необов’язково)', disabled: !isOwner() });
+  msg.value = cur.message || '';
+  const note = el('div', { class: 'err' });
+  const save = el('button', { class: 'btn primary', type: 'button', disabled: !isOwner() }, 'Зберегти');
+  save.addEventListener('click', async () => {
+    save.disabled = true; note.style.color = '';
+    const value = { on: on.checked, message: msg.value.trim() };
+    const { error } = await db.from('site_settings').upsert({ key: 'maintenance', value, updated_at: new Date().toISOString() });
+    save.disabled = false;
+    if (error) { note.textContent = error.message; return; }
+    await logAction('maintenance', null, value.on ? 'увімкнено' + (value.message ? ': ' + value.message : '') : 'вимкнено');
+    note.style.color = 'var(--ok)'; note.textContent = value.on ? 'Режим техробіт УВІМКНЕНО' : 'Режим техробіт вимкнено';
+  });
+
+  /* заборонені слова */
+  const wordInput = el('input', { class: 'input', placeholder: 'Нове слово або фраза', maxlength: 40, style: 'max-width:260px' });
+  const wordNote = el('div', { class: 'err' });
+  const chips = el('div', { class: 'chips', style: 'padding:0 16px 16px' });
+  const drawWords = words => {
+    chips.replaceChildren(...(words.length ? words.map(w => el('span', { class: 'chip' }, w.word, ' ',
+      el('a', { href: '#settings', title: 'Видалити', onclick: async e => {
+        e.preventDefault();
+        const { error } = await db.from('banned_words').delete().eq('word', w.word);
+        if (error) { toast(error.message, 'err'); return; }
+        await logAction('word_del', null, w.word);
+        words = words.filter(x => x.word !== w.word); drawWords(words);
+      } }, '✕'))) : [el('span', { class: 'sub' }, 'Список порожній')]));
+    chips._words = words;
+  };
+  drawWords(wordsRes.data || []);
+  const addWord = el('button', { class: 'btn', type: 'button' }, 'Додати');
+  addWord.addEventListener('click', async () => {
+    const w = wordInput.value.trim().toLowerCase();
+    wordNote.style.color = '';
+    if (w.length < 2) { wordNote.textContent = 'Мінімум 2 символи'; return; }
+    const { error } = await db.from('banned_words').insert({ word: w });
+    if (error) { wordNote.textContent = /duplicate|unique/i.test(error.message) ? 'Таке слово вже є' : error.message; return; }
+    await logAction('word_add', null, w);
+    wordInput.value = ''; wordNote.textContent = '';
+    drawWords([...(chips._words || []), { word: w }].sort((a, b) => a.word.localeCompare(b.word)));
+  });
+
+  show(
+    el('div', { class: 'panel' }, el('h3', null, '🛠️ Режим технічних робіт'),
+      el('div', { class: 'form' },
+        el('label', { style: 'display:flex;gap:8px;align-items:center' }, on, 'Увімкнути (звичайні користувачі побачать заставку; персонал працює як зазвичай)'),
+        msg, note, isOwner() ? el('div', null, save) : el('div', { class: 'sub' }, 'Змінювати може лише власник'))),
+    el('div', { class: 'panel' }, el('h3', null, '🚫 Заборонені слова в коментарях'),
+      el('div', { class: 'form' },
+        el('div', { class: 'sub' }, 'Коментар із таким словом (як частиною тексту, без урахування регістру) не буде опубліковано. Персонал не обмежується.'),
+        el('div', { class: 'toolbar', style: 'margin:0' }, wordInput, addWord), wordNote),
+      wordsRes.error ? el('div', { class: 'empty' }, wordsRes.error.message) : chips));
 }
 
 /* ============================ ОГОЛОШЕННЯ ============================ */
