@@ -240,7 +240,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів', points_adjust: 'нарахував або зняв бали'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -1032,7 +1032,7 @@ const admLevel = p => { let c = ADM_LEVELS[0]; ADM_LEVELS.forEach(l => { if (Num
 const fmtN = n => (Math.round(Number(n || 0) * 10) / 10).toLocaleString('uk-UA');
 
 async function pgPoints(tok) {
-  const [rulesRes, boardRes] = await Promise.all([db.from('points_rules').select('*').order('sort'), db.rpc('points_board', { p_days: null, p_limit: 30 })]);
+  const [rulesRes, boardRes, adjRes] = await Promise.all([db.from('points_rules').select('*').order('sort'), db.rpc('points_board', { p_days: null, p_limit: 30 }), db.from('points_adjustments').select('*').order('created_at', { ascending: false }).limit(30)]);
   if (stale(tok)) return;
   if (rulesRes.error) {
     show(el('div', { class: 'panel' }, el('div', { style: 'padding:16px' }, el('b', null, 'Систему балів ще не підключено.'),
@@ -1056,7 +1056,59 @@ async function pgPoints(tok) {
       el('div', { class: 'acts' }, el('label', { class: 'sub' }, 'Балів ', pIn), el('label', { class: 'sub' }, 'Ліміт ', cIn), save, msg));
   });
   const board = boardRes.error ? [] : (boardRes.data || []);
+  const adjList = adjRes.error ? null : (adjRes.data || []);
+  const adjUsers = adjList ? await usersMap([...adjList.map(x => x.user_id), ...adjList.map(x => x.created_by)].filter(Boolean)) : {};
+  if (stale(tok)) return;
+
+  /* ручне нарахування або зняття балів */
+  let target = null;
+  const targetLbl = el('b', null, 'не вибрано');
+  const nickIn = el('input', { class: 'input', placeholder: 'Нік користувача…', style: 'max-width:220px', autocomplete: 'off' });
+  const sugBox = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-top:6px' });
+  const setTarget = t => { target = t; targetLbl.textContent = t ? t.username : 'не вибрано'; sugBox.replaceChildren(); };
+  nickIn.addEventListener('input', () => {
+    clearTimeout(nickIn._t);
+    nickIn._t = setTimeout(async () => {
+      const q = nickIn.value.trim();
+      if (q.length < 2) { sugBox.replaceChildren(); return; }
+      const { data } = await db.from('profiles').select('id, username').ilike('username', '%' + escLike(q) + '%').limit(8);
+      sugBox.replaceChildren(...(data || []).map(u => el('button', { class: 'btn small', onclick: () => setTarget(u) }, u.username)));
+    }, 300);
+  });
+  const selfBtn = el('button', { class: 'btn small', onclick: () => setTarget({ id: me.id, username: me.name || 'я' }) }, 'Собі');
+  const amtIn = el('input', { class: 'input', type: 'number', step: '1', placeholder: '+50 або −20', style: 'max-width:130px' });
+  const reasonIn = el('input', { class: 'input', placeholder: 'Причина (обов’язково)', maxlength: 200 });
+  const grantMsg = el('div', { class: 'err' });
+  const grantBtn = el('button', { class: 'btn primary', onclick: async () => {
+    grantMsg.style.color = ''; grantMsg.textContent = '';
+    const points = Number(amtIn.value); const reason = reasonIn.value.trim();
+    if (!target) { grantMsg.textContent = 'Оберіть користувача (почніть вводити нік або натисніть «Собі»)'; return; }
+    if (!points || Math.abs(points) > 100000) { grantMsg.textContent = 'Вкажіть кількість балів (не 0)'; return; }
+    if (reason.length < 2) { grantMsg.textContent = 'Вкажіть причину'; return; }
+    if (!(await askConfirm((points > 0 ? 'Нарахувати +' : 'Зняти ') + Math.abs(points) + ' балів?', 'Користувач: ' + target.username + (target.id === me.id ? ' (це ви)' : '') + '. Причина: ' + reason + '. Запис буде видно в журналі.', 'Підтвердити', points < 0))) return;
+    const { error } = await db.from('points_adjustments').insert({ user_id: target.id, points, reason });
+    if (error) { grantMsg.textContent = error.message; return; }
+    await logAction('points_adjust', target.username, (points > 0 ? '+' : '') + points + ' · ' + reason);
+    if (target.id !== me.id) await notify(target.id, (points > 0 ? 'Адміністрація нарахувала вам +' + points : 'Адміністрація зняла ' + Math.abs(points)) + ' балів. Причина: ' + reason);
+    toast('Готово'); pgPoints(++renderTok);
+  } }, 'Застосувати');
+  const grantPanel = el('div', { class: 'panel' }, el('h3', null, '🎁 Нарахувати або зняти бали'),
+    adjList === null ? el('div', { style: 'padding:16px' }, el('p', { class: 'err' }, 'Таблиці ручних нарахувань ще немає. Виконайте оновлений points.sql у Supabase.'))
+      : el('div', { style: 'padding:16px;display:grid;gap:10px;max-width:720px' },
+        el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' }, el('span', { class: 'sub' }, 'Одержувач:'), targetLbl, nickIn, selfBtn), sugBox,
+        el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, amtIn, reasonIn, grantBtn), grantMsg,
+        el('p', { class: 'sub' }, 'Мінус знімає бали. Кожне нарахування (і собі також) має причину, автора та запис у «Журналі», а в профілі користувача з’являється рядок «Бонус від адміністрації».')),
+    adjList && adjList.length ? adjList.map(x => el('div', { class: 'row' },
+      el('div', { class: 'info' }, el('p', null, userLink(x.user_id, (adjUsers[x.user_id] || {}).username), el('span', { class: 'tag' + (x.points > 0 ? ' ok' : ' ban') }, (x.points > 0 ? '+' : '') + fmtN(x.points)), x.user_id === x.created_by ? el('span', { class: 'tag' }, 'собі') : null),
+        el('p', { class: 'sub' }, x.reason + ' · видав(ла): ' + ((adjUsers[x.created_by] || {}).username || '—') + ' · ' + fmtDate(x.created_at))),
+      el('div', { class: 'acts' }, el('button', { class: 'btn small danger', onclick: async () => {
+        if (!(await askConfirm('Скасувати це нарахування?', 'Бали користувача буде перераховано.', 'Скасувати', true))) return;
+        const e2 = await del('points_adjustments', x.id);
+        if (e2) { toast(e2, 'err'); return; }
+        await logAction('points_adjust', (adjUsers[x.user_id] || {}).username, 'скасовано: ' + (x.points > 0 ? '+' : '') + x.points + ' · ' + x.reason);
+        toast('Скасовано'); pgPoints(++renderTok); } }, 'Скасувати')))) : null);
   show(
+    grantPanel,
     el('div', { class: 'panel' }, el('h3', null, '⚙️ Правила нарахування'), ruleRows,
       el('div', { class: 'row' }, el('div', { class: 'info sub' }, 'Бали не зберігаються, а рахуються з даних (фото, вподобання, обране, коментарі, перегляди). Зміна правила одразу перераховує всім. Вподобання й обране від самого автора, а також коментарі до власних фото не враховуються. Забанені користувачі в рейтингу не показуються.'))),
     el('div', { class: 'panel' }, el('h3', null, '🏆 Рівні'), el('div', { class: 'row', style: 'flex-wrap:wrap' }, ...ADM_LEVELS.map(l => el('span', { class: 'tag', style: 'margin:2px 6px 2px 0;font-size:13px' }, l[1] + ' ' + l[2] + ' · від ' + l[0])))),
