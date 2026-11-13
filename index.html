@@ -106,6 +106,18 @@ textarea.input { resize: vertical; min-height: 90px; }
 .thumb { width: 56px; height: 42px; border-radius: 8px; object-fit: cover; background: var(--panel2); flex: none; cursor: zoom-in; }
 .form { padding: 16px; display: grid; gap: 10px; max-width: 640px; }
 
+/* телефон: рядки списків переносяться, а не виходять за екран */
+@media (max-width: 760px) {
+  .row { flex-wrap: wrap; }
+  .row .info { flex: 1 1 200px; }
+  .row .acts { flex: 1 1 auto; justify-content: flex-start; }
+  .toolbar .input { max-width: none; flex: 1 1 140px; }
+  .dlg-box { max-height: 94vh; overflow-y: auto; }
+  #top { flex-wrap: wrap; padding: 10px 12px; gap: 8px; }
+  #top h1 { flex: 1 1 100%; font-size: 18px; }
+  .me { flex-wrap: wrap; }
+  #main { padding: 14px 12px 60px; }
+}
 /* діалог, лайтбокс, тост */
 .dlg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
 .dlg-box { width: 100%; max-width: 440px; background: var(--panel); border-radius: 16px; padding: 22px; box-shadow: var(--shadow); }
@@ -224,7 +236,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -450,6 +462,9 @@ const PAGES = [
   { id: 'comments', ico: '💬', title: 'Коментарі', min: 'photomod', render: pgComments },
   { id: 'reports', ico: '🚩', title: 'Скарги', min: 'photomod', render: pgReports, badge: 'reports' },
   { id: 'broadcast', ico: '📣', title: 'Оголошення', min: 'admin', render: pgBroadcast },
+  { id: 'vehicles', ico: '🚌', title: 'Транспорт', min: 'admin', render: pgVehicles },
+  { id: 'models', ico: '🏷️', title: 'Моделі', min: 'admin', render: pgModels },
+  { id: 'health', ico: '🩺', title: 'Перевірка бази', min: 'admin', render: pgHealth },
   { id: 'import', ico: '📥', title: 'Імпорт транспорту', min: 'admin', render: pgImport },
   { id: 'settings', ico: '⚙️', title: 'Налаштування', min: 'admin', render: pgSettings },
   { id: 'log', ico: '📜', title: 'Журнал', min: 'admin', render: pgLog }
@@ -1472,6 +1487,346 @@ async function pgLog(tok) {
         el('p', null, el('b', null, x.actor_name || 'Невідомий'), ' ' + (LOG_LABELS[x.action] || x.action) + (x.city_name ? ' «' + x.city_name + '»' : '')),
         x.reason ? el('p', null, (x.action === 'broadcast' ? 'Текст: ' : 'Причина: ') + x.reason) : null,
         el('p', { class: 'sub' }, fmtDate(x.created_at))))) : el('div', { class: 'empty' }, 'Записів немає')));
+}
+
+
+/* ============================ ТРАНСПОРТ: масове керування ============================ */
+const natA = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true });
+async function fetchAllA(table, cols, apply, cap) {
+  const out = [];
+  for (let from = 0; from < (cap || 5000); from += 1000) {
+    const { data, error } = await apply(db.from(table).select(cols)).range(from, from + 999);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return out;
+}
+function xModal(nodes, width) {
+  const ov = el('div', { class: 'dlg xm' });
+  ov.append(el('div', { class: 'dlg-box', style: 'max-width:' + (width || 640) + 'px;max-height:92vh;overflow-y:auto' }, ...nodes));
+  ov.addEventListener('mousedown', e => { if (e.target === ov) ov.remove(); });
+  document.body.append(ov);
+  return ov;
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.dlg.xm').forEach(x => x.remove()); });
+
+const vh = { city: '', ent: '', status: '', type: '', issue: '', q: '', page: 0, size: 50, sel: new Set(), total: 0, refs: { cities: [], ents: [] } };
+const stLabelA = k => (IMP_STATUSES.find(x => x[0] === k) || [k, k])[1];
+const tpLabelA = k => (IMP_TYPES.find(x => x[0] === k) || [k, k])[1];
+
+function vhApply(q) {
+  if (vh.city) q = q.eq('city_id', vh.city);
+  if (vh.ent) q = q.eq('enterprise_id', vh.ent);
+  if (vh.status) q = q.eq('status', vh.status);
+  if (vh.type) q = q.eq('vehicle_type', vh.type);
+  if (vh.issue === 'noyear') q = q.is('build_year', null);
+  if (vh.issue === 'novin') q = q.is('vin', null);
+  if (vh.issue === 'nofactory') q = q.is('factory_no', null);
+  if (vh.q) {
+    const s = escLike(vh.q).replace(/[,()"]/g, ' ');
+    q = q.or('fleet_no.ilike.%' + s + '%,plate_no.ilike.%' + s + '%,model.ilike.%' + s + '%,vin.ilike.%' + s + '%,factory_no.ilike.%' + s + '%');
+  }
+  return q;
+}
+const cityNameA = id => (vh.refs.cities.find(c => c.id === id) || {}).name || '';
+const entNameA = id => (vh.refs.ents.find(e => e.id === id) || {}).name || '';
+
+async function pgVehicles(tok) {
+  const [c, e] = await Promise.all([db.from('cities').select('id, name, country').order('name'), db.from('enterprises').select('id, name, city_id').order('name').limit(3000)]);
+  if (stale(tok)) return;
+  vh.refs = { cities: c.data || [], ents: e.data || [] };
+  await drawVehicles(tok);
+}
+
+async function drawVehicles(tok) {
+  const from = vh.page * vh.size;
+  const { data, error, count } = await vhApply(db.from('vehicles').select('*', { count: 'exact' })).order('city_id').order('fleet_no').range(from, from + vh.size - 1);
+  if (stale(tok)) return;
+  const rows = (data || []).slice().sort((a, b) => natA(a.city_id, b.city_id) || natA(a.enterprise_id, b.enterprise_id) || natA(a.fleet_no, b.fleet_no));
+  vh.total = count == null ? rows.length : count;
+  const pages = Math.max(1, Math.ceil(vh.total / vh.size));
+
+  const sel = (opts, val, onch, ph) => { const s = el('select', { class: 'input', style: 'max-width:210px' }, el('option', { value: '' }, ph), ...opts.map(([k, l]) => el('option', { value: k, selected: val === k }, l))); s.addEventListener('change', () => onch(s.value)); return s; };
+  const reset = () => { vh.page = 0; vh.sel.clear(); pgVehicles(++renderTok); };
+  const citySel = sel(vh.refs.cities.map(c => [c.id, c.name + (c.country ? ' · ' + c.country : '')]), vh.city, v => { vh.city = v; vh.ent = ''; reset(); }, 'Усі міста');
+  const entSel = sel(vh.refs.ents.filter(e => !vh.city || e.city_id === vh.city).map(e => [e.id, e.name]), vh.ent, v => { vh.ent = v; reset(); }, 'Усі підприємства');
+  const stSel = sel(IMP_STATUSES, vh.status, v => { vh.status = v; reset(); }, 'Усі статуси');
+  const tpSel = sel(IMP_TYPES, vh.type, v => { vh.type = v; reset(); }, 'Усі види');
+  const isSel = sel([['noyear', 'без року випуску'], ['novin', 'без VIN'], ['nofactory', 'без заводського №']], vh.issue, v => { vh.issue = v; reset(); }, 'Без фільтра даних');
+  const search = el('input', { class: 'input', placeholder: 'Пошук: номер, модель, VIN…', value: vh.q, style: 'max-width:260px' });
+  search.addEventListener('input', () => { clearTimeout(search._t); search._t = setTimeout(() => { vh.q = search.value.trim(); reset(); }, 350); });
+
+  const bulk = el('div');
+  const drawBulk = () => {
+    const n = vh.sel.size;
+    if (!n) { bulk.replaceChildren(); return; }
+    const stS = el('select', { class: 'input', style: 'max-width:200px' }, el('option', { value: '' }, 'Змінити статус…'), ...IMP_STATUSES.map(([k, l]) => el('option', { value: k }, l)));
+    const tpS = el('select', { class: 'input', style: 'max-width:160px' }, el('option', { value: '' }, 'Змінити вид…'), ...IMP_TYPES.map(([k, l]) => el('option', { value: k }, l)));
+    stS.addEventListener('change', () => { if (stS.value) vhBulk({ status: stS.value }, 'статус «' + stLabelA(stS.value) + '»'); });
+    tpS.addEventListener('change', () => { if (tpS.value) vhBulk({ vehicle_type: tpS.value }, 'вид «' + tpLabelA(tpS.value) + '»'); });
+    const allBtn = vh.total > vh.size && n < vh.total ? el('button', { class: 'btn small', onclick: vhSelectAll }, 'Вибрати всі ' + vh.total + ' за фільтром') : null;
+    bulk.replaceChildren(el('div', { class: 'panel', style: 'padding:12px 16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center' },
+      el('b', null, 'Вибрано: ' + n), allBtn, stS, tpS,
+      el('button', { class: 'btn small', onclick: async () => { const v = await dialog({ title: 'Нова модель для ' + n + ' ТЗ', input: 'Модель', okLabel: 'Застосувати', required: true }); if (v) vhBulk({ model: v }, 'модель «' + v + '»'); } }, 'Задати модель…'),
+      el('button', { class: 'btn small', onclick: async () => { const v = await dialog({ title: 'Дата списання для ' + n + ' ТЗ', text: 'Наприклад 09.2022 або 2024. Порожнє значення не прийме.', input: 'Дата', okLabel: 'Застосувати', required: true }); if (v) vhBulk({ written_off: v.slice(0, 20) }, 'дата списання «' + v + '»'); } }, 'Задати дату списання…'),
+      el('button', { class: 'btn small danger', onclick: vhBulkDelete }, '🗑 Видалити'),
+      el('button', { class: 'btn small', onclick: () => { vh.sel.clear(); drawVehicles(++renderTok); } }, 'Скинути')));
+  };
+
+  const list = el('div', { class: 'panel' }, error ? el('div', { class: 'empty' }, error.message) : rows.length ? rows.map(v => {
+    const cb = el('input', { type: 'checkbox', checked: vh.sel.has(v.id) });
+    cb.addEventListener('change', () => { cb.checked ? vh.sel.add(v.id) : vh.sel.delete(v.id); drawBulk(); });
+    const meta = [cityNameA(v.city_id), entNameA(v.enterprise_id), v.build_year, v.vin].filter(Boolean).join(' · ');
+    return el('div', { class: 'row' }, cb,
+      el('div', { class: 'info' }, el('p', null, el('b', null, v.fleet_no), ' ' + v.model, v.plate_no ? el('span', { class: 'sub' }, ' · ' + v.plate_no) : null),
+        el('p', { class: 'sub' }, meta)),
+      el('div', { class: 'acts' }, el('span', { class: 'tag' }, tpLabelA(v.vehicle_type)), el('span', { class: 'tag' + (v.status === 'active' ? ' ok' : '') }, stLabelA(v.status)),
+        el('button', { class: 'btn small', onclick: () => vhEdit(v) }, 'Змінити')));
+  }) : el('div', { class: 'empty' }, 'Нічого не знайдено'));
+
+  const allOnPage = el('input', { type: 'checkbox' });
+  allOnPage.addEventListener('change', () => { rows.forEach(v => allOnPage.checked ? vh.sel.add(v.id) : vh.sel.delete(v.id)); drawVehicles(++renderTok); });
+  show(
+    el('div', { class: 'toolbar' }, citySel, entSel, stSel, tpSel, isSel),
+    el('div', { class: 'toolbar' }, search, el('button', { class: 'btn', onclick: vhExport }, '⬇ CSV за фільтром'), el('span', { class: 'sub' }, 'Знайдено: ' + vh.total + ' · сторінка ' + (vh.page + 1) + ' з ' + pages),
+      el('label', { class: 'sub', style: 'margin-left:auto;display:inline-flex;gap:6px;align-items:center' }, allOnPage, 'вибрати все на сторінці')),
+    bulk, list,
+    el('div', { class: 'more' }, el('button', { class: 'btn', disabled: vh.page <= 0, onclick: () => { vh.page--; drawVehicles(++renderTok); } }, '← Назад'), ' ',
+      el('button', { class: 'btn', disabled: vh.page + 1 >= pages, onclick: () => { vh.page++; drawVehicles(++renderTok); } }, 'Далі →')));
+  drawBulk();
+}
+
+async function vhSelectAll() {
+  const ids = await fetchAllA('vehicles', 'id', q => vhApply(q), 5000);
+  ids.forEach(r => vh.sel.add(r.id));
+  toast('Вибрано: ' + vh.sel.size + (ids.length >= 5000 ? ' (ліміт 5000)' : ''));
+  drawVehicles(++renderTok);
+}
+async function vhBulk(patch, label) {
+  const ids = [...vh.sel];
+  if (!ids.length) return;
+  if (!(await askConfirm('Змінити ' + ids.length + ' ТЗ?', 'Буде змінено: ' + label + '.', 'Змінити', false))) { drawVehicles(++renderTok); return; }
+  let done = 0;
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await db.from('vehicles').update(patch).in('id', ids.slice(i, i + 100)).select('id');
+    if (error) { toast(error.message, 'err'); break; }
+    done += (data || []).length;
+  }
+  await logAction('vehicles_bulk', null, label + ': ' + done + ' з ' + ids.length + ' ТЗ');
+  toast(done === ids.length ? 'Змінено ТЗ: ' + done : 'Змінено ' + done + ' з ' + ids.length + ' (решту заблокували права)', done === ids.length ? undefined : 'err');
+  vh.sel.clear();
+  pgVehicles(++renderTok);
+}
+async function vhBulkDelete() {
+  const ids = [...vh.sel];
+  if (!ids.length) return;
+  const reason = await askReason('Видалити ' + ids.length + ' ТЗ безповоротно?', 'Видалити');
+  if (!reason) return;
+  let done = 0;
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await db.from('vehicles').delete().in('id', ids.slice(i, i + 100)).select('id');
+    if (error) { toast(error.message, 'err'); break; }
+    done += (data || []).length;
+  }
+  await logAction('vehicle_delete', null, done + ' ТЗ. ' + reason);
+  toast('Видалено ТЗ: ' + done, done === ids.length ? undefined : 'err');
+  vh.sel.clear();
+  pgVehicles(++renderTok);
+}
+async function vhExport() {
+  let rows;
+  try { rows = await fetchAllA('vehicles', '*', q => vhApply(q), 5000); } catch (e) { toast(e.message, 'err'); return; }
+  if (!rows.length) { toast('Немає чого експортувати', 'err'); return; }
+  rows.sort((a, b) => natA(a.city_id, b.city_id) || natA(a.enterprise_id, b.enterprise_id) || natA(a.fleet_no, b.fleet_no));
+  downloadCsv('transport.csv', [['Місто', 'Підприємство', 'Тип', 'Борт', 'Держ. №', 'Модель', 'Зав. №', 'Рік', 'VIN', 'Надійшов', 'Початок', 'Списаний', 'Статус', 'Примітка']]
+    .concat(rows.map(v => [cityNameA(v.city_id), entNameA(v.enterprise_id), tpLabelA(v.vehicle_type), v.fleet_no, v.plate_no, v.model, v.factory_no, v.build_year, v.vin, v.arrived, v.start_date, v.written_off, v.status, v.note])));
+}
+
+function vhEdit(v) {
+  const f = {};
+  const field = (key, label, props) => { f[key] = el('input', Object.assign({ class: 'input', value: v[key] == null ? '' : v[key] }, props)); return el('label', { style: 'display:grid;gap:4px;font-size:13px' }, label, f[key]); };
+  const stS = el('select', { class: 'input' }, ...IMP_STATUSES.map(([k, l]) => el('option', { value: k, selected: v.status === k }, l)));
+  const tpS = el('select', { class: 'input' }, ...IMP_TYPES.map(([k, l]) => el('option', { value: k, selected: v.vehicle_type === k }, l)));
+  const note = el('textarea', { class: 'input' }); note.value = v.note || '';
+  const err = el('div', { class: 'err' });
+  const grid = (...n) => el('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px' }, ...n);
+  const ov = xModal([
+    el('h3', null, 'ТЗ ' + v.fleet_no + ' · ' + cityNameA(v.city_id)),
+    el('p', { class: 'sub' }, entNameA(v.enterprise_id)),
+    grid(field('fleet_no', 'Борт'), field('plate_no', 'Держ. №')),
+    grid(field('model', 'Модель'), field('extra_no', 'Додатковий №')),
+    grid(field('factory_no', 'Заводський №'), field('build_year', 'Рік випуску', { type: 'number', min: 1900, max: 2100 })),
+    field('vin', 'VIN'),
+    grid(field('arrived', 'Надійшов'), field('start_date', 'Початок експлуатації')),
+    grid(field('written_off', 'Списаний'), el('div')),
+    grid(el('label', { style: 'display:grid;gap:4px;font-size:13px' }, 'Статус', stS), el('label', { style: 'display:grid;gap:4px;font-size:13px' }, 'Вид', tpS)),
+    el('label', { style: 'display:grid;gap:4px;font-size:13px' }, 'Примітка', note), err,
+    el('div', { class: 'dlg-btns' },
+      el('button', { class: 'btn danger', style: 'margin-right:auto', onclick: async () => {
+        const reason = await askReason('Видалити ТЗ ' + v.fleet_no + '?', 'Видалити');
+        if (!reason) return;
+        const e = await del('vehicles', v.id);
+        if (e) { toast(e, 'err'); return; }
+        await logAction('vehicle_delete', cityNameA(v.city_id), v.fleet_no + ' ' + v.model + '. ' + reason);
+        ov.remove(); toast('Видалено'); drawVehicles(++renderTok); } }, 'Видалити'),
+      el('button', { class: 'btn', onclick: () => ov.remove() }, 'Скасувати'),
+      el('button', { class: 'btn primary', onclick: async () => {
+        const t = k => f[k].value.trim() || null;
+        if (!f.fleet_no.value.trim() || !f.model.value.trim()) { err.textContent = 'Борт і модель обов’язкові'; return; }
+        const yr = f.build_year.value.trim();
+        const patch = { fleet_no: f.fleet_no.value.trim(), model: f.model.value.trim(), plate_no: t('plate_no'), extra_no: t('extra_no'), factory_no: t('factory_no'), vin: t('vin'),
+          build_year: yr ? Number(yr) : null, arrived: t('arrived'), start_date: t('start_date'), written_off: t('written_off'), status: stS.value, vehicle_type: tpS.value, note: note.value.trim() || null };
+        const e = await upd('vehicles', patch, v.id);
+        if (e) { err.textContent = e; return; }
+        await logAction('vehicle_edit', cityNameA(v.city_id), patch.fleet_no + ' ' + patch.model);
+        ov.remove(); toast('Збережено'); drawVehicles(++renderTok); } }, 'Зберегти'))
+  ]);
+}
+
+/* ============================ МОДЕЛІ: нормалізація назв ============================ */
+const md = { city: '', ent: '' };
+const normModel = s => String(s || '').toLowerCase().replace(/[^a-zа-яіїєґ0-9]/g, '');
+
+async function pgModels(tok) {
+  const [c, e] = await Promise.all([db.from('cities').select('id, name').order('name'), db.from('enterprises').select('id, name, city_id').order('name').limit(3000)]);
+  if (stale(tok)) return;
+  const cities = c.data || []; const ents = e.data || [];
+  const scope = q => { if (md.city) q = q.eq('city_id', md.city); if (md.ent) q = q.eq('enterprise_id', md.ent); return q; };
+  let rows;
+  try { rows = await fetchAllA('vehicles', 'id, model', q => scope(q), 20000); } catch (err) { show(el('div', { class: 'panel' }, el('div', { class: 'empty' }, err.message))); return; }
+  if (stale(tok)) return;
+  const cnt = {};
+  rows.forEach(v => { cnt[v.model] = (cnt[v.model] || 0) + 1; });
+  const models = Object.entries(cnt).sort((a, b) => b[1] - a[1]);
+  const groups = {};
+  models.forEach(([m]) => { (groups[normModel(m)] = groups[normModel(m)] || []).push(m); });
+  const selC = el('select', { class: 'input', style: 'max-width:220px' }, el('option', { value: '' }, 'Усі міста'), ...cities.map(x => el('option', { value: x.id, selected: md.city === x.id }, x.name)));
+  const selE = el('select', { class: 'input', style: 'max-width:240px' }, el('option', { value: '' }, 'Усі підприємства'), ...ents.filter(x => !md.city || x.city_id === md.city).map(x => el('option', { value: x.id, selected: md.ent === x.id }, x.name)));
+  selC.addEventListener('change', () => { md.city = selC.value; md.ent = ''; pgModels(++renderTok); });
+  selE.addEventListener('change', () => { md.ent = selE.value; pgModels(++renderTok); });
+  const withPhotos = el('input', { type: 'checkbox', checked: true });
+  const simCount = Object.values(groups).filter(g => g.length > 1).length;
+  show(
+    el('div', { class: 'toolbar' }, selC, selE, el('label', { class: 'sub', style: 'display:inline-flex;gap:6px;align-items:center' }, withPhotos, 'оновлювати й модель у фото')),
+    el('p', { class: 'sub' }, 'Моделей: ' + models.length + ' · машин: ' + rows.length + (simCount ? ' · схожих назв (імовірні дублі): ' + simCount : '')),
+    el('div', { class: 'panel' }, models.length ? models.map(([m, n]) => {
+      const inp = el('input', { class: 'input', value: m, style: 'max-width:300px' });
+      const similar = (groups[normModel(m)] || []).filter(x => x !== m).sort((a, b) => cnt[b] - cnt[a])[0];
+      const go = el('button', { class: 'btn small', onclick: () => mdRename(m, inp.value, withPhotos.checked) }, 'Перейменувати');
+      return el('div', { class: 'row' },
+        el('div', { class: 'info' }, el('p', null, el('b', null, m)), el('p', { class: 'sub' }, n + ' ТЗ' + (similar ? ' · схоже на «' + similar + '» (' + cnt[similar] + ')' : ''))),
+        el('div', { class: 'acts' }, inp, similar ? el('button', { class: 'btn small', title: 'Підставити цю назву', onclick: () => { inp.value = similar; } }, '→ ' + similar) : null, go));
+    }) : el('div', { class: 'empty' }, 'ТЗ немає')));
+}
+async function mdRename(old, neu, alsoPhotos) {
+  neu = String(neu || '').trim();
+  if (!neu || neu === old) { toast('Введіть нову назву', 'err'); return; }
+  const scopeTxt = md.ent ? 'у вибраному підприємстві' : md.city ? 'у вибраному місті' : 'у всій базі';
+  if (!(await askConfirm('Перейменувати модель?', '«' + old + '» → «' + neu + '» ' + scopeTxt + (alsoPhotos ? ', разом з фото' : '') + '.', 'Перейменувати', false))) return;
+  const scope = q => { if (md.city) q = q.eq('city_id', md.city); if (md.ent) q = q.eq('enterprise_id', md.ent); return q; };
+  const v = await scope(db.from('vehicles').update({ model: neu }).eq('model', old)).select('id');
+  if (v.error) { toast(v.error.message, 'err'); return; }
+  let ph = 0;
+  if (alsoPhotos) {
+    const p = await scope(db.from('photos').update({ model: neu }).eq('model', old)).select('id');
+    if (p.error) toast('Фото: ' + p.error.message, 'err'); else ph = (p.data || []).length;
+  }
+  await logAction('model_rename', null, '«' + old + '» → «' + neu + '»: ТЗ ' + (v.data || []).length + ', фото ' + ph);
+  toast('Готово: ТЗ ' + (v.data || []).length + ', фото ' + ph);
+  pgModels(++renderTok);
+}
+
+/* ============================ ПЕРЕВІРКА БАЗИ ============================ */
+async function pgHealth(tok) {
+  show(el('p', { class: 'sub' }, 'Перевіряю базу… це може тривати кілька секунд.'));
+  let cities; let ents; let vehs; let phs;
+  try {
+    [cities, ents, vehs, phs] = await Promise.all([
+      fetchAllA('cities', 'id, name, is_published', q => q, 5000),
+      fetchAllA('enterprises', 'id, name, city_id', q => q, 5000),
+      fetchAllA('vehicles', 'id, city_id, enterprise_id, fleet_no, plate_no, model, status', q => q, 30000),
+      fetchAllA('photos', 'id, city_id, enterprise_id, fleet_no, plate_no, model, transport, status, created_at', q => q, 50000)
+    ]);
+  } catch (err) { show(el('div', { class: 'panel' }, el('div', { class: 'empty' }, err.message))); return; }
+  if (stale(tok)) return;
+  const cName = Object.fromEntries(cities.map(c => [c.id, c.name]));
+  const eName = Object.fromEntries(ents.map(e => [e.id, e.name]));
+  const rerun = () => pgHealth(++renderTok);
+
+  /* A. дублікати бортових номерів у підприємстві */
+  const dupMap = {};
+  vehs.forEach(v => { const k = v.enterprise_id + '|' + String(v.fleet_no).trim(); (dupMap[k] = dupMap[k] || []).push(v); });
+  const dups = Object.values(dupMap).filter(g => g.length > 1).sort((a, b) => natA(a[0].fleet_no, b[0].fleet_no));
+
+  /* B. фото, для яких немає ТЗ */
+  const vKeys = new Set(Object.keys(dupMap));
+  const orphMap = {};
+  phs.forEach(p => {
+    const fn = String(p.fleet_no || '').trim();
+    if (!fn || !p.enterprise_id) return;
+    const k = p.enterprise_id + '|' + fn;
+    if (vKeys.has(k)) return;
+    (orphMap[k] = orphMap[k] || []).push(p);
+  });
+  const orphans = Object.entries(orphMap).sort((a, b) => b[1].length - a[1].length);
+
+  /* C/D. порожні підприємства й міста */
+  const entsWith = new Set(vehs.map(v => v.enterprise_id));
+  const emptyEnts = ents.filter(e => !entsWith.has(e.id));
+  const citiesWithEnts = new Set(ents.map(e => e.city_id));
+  const emptyCities = cities.filter(c => c.is_published && !citiesWithEnts.has(c.id));
+
+  /* E. давні фото на модерації */
+  const oldPending = phs.filter(p => p.status === 'pending' && Date.now() - new Date(p.created_at).getTime() > 7 * 864e5);
+
+  /* F. схожі назви моделей */
+  const mc = {};
+  vehs.forEach(v => { mc[v.model] = (mc[v.model] || 0) + 1; });
+  const gm = {};
+  Object.keys(mc).forEach(m => { (gm[normModel(m)] = gm[normModel(m)] || []).push(m); });
+  const similar = Object.values(gm).filter(g => g.length > 1);
+
+  const check = (title, items, draw, okText, hint) => {
+    if (!items.length) return el('div', { class: 'panel' }, el('div', { class: 'row' }, el('span', { class: 'tag ok' }, '✓'), el('div', { class: 'info' }, el('b', null, title), el('p', { class: 'sub' }, okText))));
+    const more = items.length > 100 ? el('div', { class: 'row' }, el('span', { class: 'sub' }, 'Показано перші 100 із ' + items.length)) : null;
+    const d = el('details', null, el('summary', { style: 'cursor:pointer;padding:12px 16px;font-weight:600' }, '⚠ ' + title + ': ' + items.length, hint ? el('span', { class: 'sub', style: 'font-weight:400' }, ' · ' + hint) : null), ...items.slice(0, 100).map(draw), more);
+    return el('div', { class: 'panel' }, d);
+  };
+
+  show(
+    el('div', { class: 'cards' },
+      el('div', { class: 'stat' }, el('b', null, vehs.length.toLocaleString('uk-UA')), el('span', null, 'ТЗ у базі')),
+      el('div', { class: 'stat' }, el('b', null, phs.length.toLocaleString('uk-UA')), el('span', null, 'фото у базі')),
+      el('div', { class: 'stat' + (dups.length ? ' warn' : '') }, el('b', null, dups.length), el('span', null, 'груп-дублікатів')),
+      el('div', { class: 'stat' + (orphans.length ? ' warn' : '') }, el('b', null, orphans.length), el('span', null, 'номерів на фото без ТЗ'))),
+    el('div', { class: 'toolbar' }, el('button', { class: 'btn', onclick: rerun }, '↻ Перевірити ще раз')),
+    check('Однакові бортові номери в одному підприємстві', dups, g => el('div', { class: 'row' },
+      el('div', { class: 'info' }, el('p', null, el('b', null, g[0].fleet_no), ' · ' + (eName[g[0].enterprise_id] || '') + ' · ' + (cName[g[0].city_id] || '')),
+        ...g.map(v => el('p', { class: 'sub' }, v.model + ' · ' + stLabelA(v.status) + ' · ' + (v.plate_no || 'без держ. №')))),
+      el('div', { class: 'acts' }, ...g.slice(1).map(v => el('button', { class: 'btn small danger', title: 'Видалити цей запис', onclick: async () => {
+        const reason = await askReason('Видалити дублікат ' + v.fleet_no + ' (' + v.model + ')?', 'Видалити');
+        if (!reason) return;
+        const e = await del('vehicles', v.id);
+        if (e) { toast(e, 'err'); return; }
+        await logAction('vehicle_delete', cName[v.city_id], 'дублікат ' + v.fleet_no + ' ' + v.model + '. ' + reason);
+        toast('Видалено'); rerun(); } }, '🗑 ' + v.model)))),
+      'Дублікатів немає', 'видаліть зайвий запис'),
+    check('Фото з бортовим номером, якого немає в базі транспорту', orphans, ([k, list]) => {
+      const p0 = list[0];
+      return el('div', { class: 'row' },
+        el('div', { class: 'info' }, el('p', null, el('b', null, p0.fleet_no), (p0.model ? ' · ' + p0.model : '')), el('p', { class: 'sub' }, (eName[p0.enterprise_id] || '') + ' · ' + (cName[p0.city_id] || '') + ' · фото: ' + list.length)),
+        el('div', { class: 'acts' }, el('button', { class: 'btn small primary', onclick: async () => {
+          const tp = IMP_TYPES.some(x => x[0] === p0.transport) ? p0.transport : 'bus';
+          const { error } = await db.from('vehicles').insert({ city_id: p0.city_id, enterprise_id: p0.enterprise_id, owner_id: me.id, fleet_no: String(p0.fleet_no).trim(), plate_no: p0.plate_no || null, vehicle_type: tp, model: p0.model || 'Невідомо', status: 'active' });
+          if (error) { toast(error.message, 'err'); return; }
+          await logAction('vehicle_create', cName[p0.city_id], p0.fleet_no + ' із фото');
+          toast('ТЗ створено. Уточніть його дані на сторінці «Транспорт»'); rerun(); } }, '＋ Створити ТЗ')));
+    }, 'Для кожного фото є ТЗ', 'створіть ТЗ одним кліком'),
+    check('Підприємства без жодної машини', emptyEnts, e => el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, el('b', null, e.name)), el('p', { class: 'sub' }, cName[e.city_id] || ''))), 'У кожного підприємства є транспорт'),
+    check('Опубліковані міста без підприємств', emptyCities, c => el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, el('b', null, c.name)))), 'У кожного міста є підприємство'),
+    check('Фото на модерації понад 7 днів', oldPending, p => el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, el('b', null, p.fleet_no || 'без номера'), ' · ' + (p.model || '')), el('p', { class: 'sub' }, (cName[p.city_id] || '') + ' · ' + fmtDate(p.created_at)))), 'Немає застарілих заявок', 'розгляньте на сторінці «Фото»'),
+    check('Схожі назви моделей (імовірні дублі)', similar, g => el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, g.map(m => '«' + m + '» (' + mc[m] + ')').join(' ≈ '))), el('div', { class: 'acts' }, el('a', { class: 'btn small', href: '#models' }, 'До «Моделі»'))), 'Назви моделей уніфіковані', 'об’єднайте на сторінці «Моделі»'));
 }
 
 /* ============================ СТАРТ ============================ */
