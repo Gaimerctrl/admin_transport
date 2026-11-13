@@ -240,7 +240,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -480,6 +480,7 @@ const PAGES = [
   { id: 'vehicles', ico: '🚌', title: 'Транспорт', min: 'admin', render: pgVehicles },
   { id: 'models', ico: '🏷️', title: 'Моделі', min: 'admin', render: pgModels },
   { id: 'health', ico: '🩺', title: 'Перевірка бази', min: 'admin', render: pgHealth },
+  { id: 'history', ico: '🕘', title: 'Історія змін', min: 'admin', render: pgHistory },
   { id: 'import', ico: '📥', title: 'Імпорт транспорту', min: 'admin', render: pgImport },
   { id: 'settings', ico: '⚙️', title: 'Налаштування', min: 'admin', render: pgSettings },
   { id: 'log', ico: '📜', title: 'Журнал', min: 'admin', render: pgLog }
@@ -1890,6 +1891,77 @@ async function mdRename(old, neu, alsoPhotos) {
   await logAction('model_rename', null, '«' + old + '» → «' + neu + '»: ТЗ ' + (v.data || []).length + ', фото ' + ph);
   toast('Готово: ТЗ ' + (v.data || []).length + ', фото ' + ph);
   pgModels(++renderTok);
+}
+
+
+/* ============================ ІСТОРІЯ ЗМІН ТРАНСПОРТУ ============================ */
+const hs = { action: '', actor: '', city: '', q: '' };
+const HS_FIELDS = { fleet_no: 'Борт', plate_no: 'Держ. №', extra_no: 'Дод. №', model: 'Модель', factory_no: 'Зав. №', build_year: 'Рік', vin: 'VIN', start_date: 'Початок', arrived: 'Надійшов', written_off: 'Списаний', status: 'Статус', vehicle_type: 'Вид', note: 'Примітка', enterprise_id: 'Підприємство', city_id: 'Місто' };
+function hsVal(k, v) {
+  if (v == null || v === '') return '—';
+  if (k === 'status') return stLabelA(v);
+  if (k === 'vehicle_type') return tpLabelA(v);
+  if (k === 'enterprise_id' || k === 'city_id') return 'інше';
+  return String(v);
+}
+async function pgHistory(tok) {
+  let q = db.from('vehicle_history').select('*').order('created_at', { ascending: false }).limit(300);
+  if (hs.action) q = q.eq('action', hs.action);
+  if (hs.city) q = q.eq('city_id', hs.city);
+  const [res, cs] = await Promise.all([q, db.from('cities').select('id, name').order('name')]);
+  if (stale(tok)) return;
+  if (res.error) {
+    show(el('div', { class: 'panel' }, el('div', { class: 'pad', style: 'padding:16px' }, el('b', null, 'Журнал змін ще не підключено.'),
+      el('p', null, 'У Supabase → SQL Editor виконайте файл ', el('code', null, 'history.sql'), ', потім оновіть сторінку.'), el('p', { class: 'err' }, res.error.message))));
+    return;
+  }
+  const cName = Object.fromEntries((cs.data || []).map(c => [c.id, c.name]));
+  const all = res.data || [];
+  const actors = [...new Set(all.map(x => x.actor_name).filter(Boolean))].sort();
+  const f = hs.q.toLowerCase();
+  const list = all.filter(x => (!hs.actor || x.actor_name === hs.actor) && (!f || [x.fleet_no, x.model, x.actor_name].some(v => String(v || '').toLowerCase().includes(f))));
+  const mkSel = (opts, val, ph, fn, w) => { const s2 = el('select', { class: 'input', style: 'max-width:' + w + 'px' }, el('option', { value: '' }, ph), ...opts.map(([k, l]) => el('option', { value: k, selected: val === k }, l))); s2.addEventListener('change', () => fn(s2.value)); return s2; };
+  const search = el('input', { class: 'input', placeholder: 'Борт, модель, автор…', value: hs.q, style: 'max-width:220px' });
+  search.addEventListener('input', () => { clearTimeout(search._t); search._t = setTimeout(() => { hs.q = search.value.trim(); pgHistory(++renderTok); }, 300); });
+  const ACT = { create: 'додав(ла)', update: 'змінив(ла)', delete: 'видалив(ла)' };
+  show(
+    el('div', { class: 'toolbar' },
+      mkSel([['update', 'Зміни'], ['create', 'Додавання'], ['delete', 'Видалення']], hs.action, 'Усі дії', v => { hs.action = v; pgHistory(++renderTok); }, 160),
+      mkSel((cs.data || []).map(c => [c.id, c.name]), hs.city, 'Усі міста', v => { hs.city = v; pgHistory(++renderTok); }, 200),
+      mkSel(actors.map(a => [a, a]), hs.actor, 'Усі автори змін', v => { hs.actor = v; pgHistory(++renderTok); }, 190), search,
+      el('span', { class: 'sub' }, 'Записів: ' + list.length)),
+    el('div', { class: 'panel' }, list.length ? list.map(h => {
+      const chips = h.action === 'update' ? Object.entries(h.changes || {}).filter(([k]) => k !== 'owner_id').map(([k, p2]) =>
+        el('span', { class: 'tag', style: 'margin:2px 6px 0 0;font-weight:500' }, (HS_FIELDS[k] || k) + ': ', el('s', null, hsVal(k, p2[0])), ' → ' + hsVal(k, p2[1]))) : [];
+      const btn = h.action === 'update' ? el('button', { class: 'btn small', onclick: () => hsRevert(h, cName) }, '↩ Відкотити')
+        : h.action === 'delete' ? el('button', { class: 'btn small primary', onclick: () => hsRevert(h, cName) }, '↩ Відновити')
+        : el('button', { class: 'btn small danger', onclick: () => hsRevert(h, cName) }, '🗑 Скасувати');
+      return el('div', { class: 'row' },
+        el('div', { class: 'info' },
+          el('p', null, el('b', null, h.actor_name || 'система'), ' ' + (ACT[h.action] || h.action) + ' · ', el('b', null, h.fleet_no || '—'), ' ' + (h.model || '') + ' · ' + (cName[h.city_id] || '')),
+          chips.length ? el('div', null, ...chips) : null, el('p', { class: 'sub' }, fmtDate(h.created_at))),
+        el('div', { class: 'acts' }, btn));
+    }) : el('div', { class: 'empty' }, 'Змін поки немає')));
+}
+async function hsRevert(h, cName) {
+  const title = { update: 'Відкотити цю зміну?', delete: 'Відновити видалену машину?', create: 'Скасувати додавання (видалити машину)?' }[h.action];
+  if (!(await askConfirm(title, 'Борт ' + (h.fleet_no || '—') + ' · ' + (h.model || ''), 'Підтвердити', h.action === 'create'))) return;
+  if (h.action === 'update') {
+    const patch = {};
+    Object.entries(h.changes || {}).forEach(([k, p2]) => { if (k !== 'owner_id') patch[k] = p2[0]; });
+    const e = await upd('vehicles', patch, h.vehicle_id);
+    if (e) { toast(/не знайдено/.test(e) ? 'Машини вже немає в базі: спершу відновіть її через запис «видалив»' : e, 'err'); return; }
+  } else if (h.action === 'delete') {
+    if (!h.snapshot) { toast('Немає знімка запису для відновлення', 'err'); return; }
+    const { error } = await db.from('vehicles').insert(h.snapshot);
+    if (error) { toast(error.message, 'err'); return; }
+  } else {
+    const e = await del('vehicles', h.vehicle_id);
+    if (e) { toast(e, 'err'); return; }
+  }
+  await logAction('vehicle_revert', cName[h.city_id] || null, h.action + ': ' + (h.fleet_no || '') + ' ' + (h.model || ''));
+  toast('Готово');
+  pgHistory(++renderTok);
 }
 
 /* ============================ ПЕРЕВІРКА БАЗИ ============================ */
