@@ -106,6 +106,9 @@ textarea.input { resize: vertical; min-height: 90px; }
 .thumb { width: 56px; height: 42px; border-radius: 8px; object-fit: cover; background: var(--panel2); flex: none; cursor: zoom-in; }
 .form { padding: 16px; display: grid; gap: 10px; max-width: 640px; }
 
+.pcard.kfocus { outline: 3px solid var(--accent); outline-offset: 2px; }
+.keyhint { margin: -6px 0 10px; }
+@media (max-width: 760px) { .keyhint, #palBtn { display: none; } }
 /* телефон: рядки списків переносяться, а не виходять за екран */
 @media (max-width: 760px) {
   .row { flex-wrap: wrap; }
@@ -194,6 +197,7 @@ textarea.input { resize: vertical; min-height: 90px; }
   <div id="content">
     <header id="top">
       <h1 id="pageTitle"></h1>
+      <button class="btn small" id="palBtn" type="button" title="Швидкий пошук (Ctrl+K або /)">🔎 Ctrl+K</button>
       <button class="btn small" id="themeBtn" type="button" title="Тема">🌓</button>
       <div class="me"><img class="avatar" id="meAvatar" alt=""><span id="meName"></span><span class="tag" id="meRole"></span></div>
       <button class="btn small" id="logoutBtn" type="button">Вийти</button>
@@ -279,6 +283,8 @@ function closeDlg(val) {
   if (dlgDone) { const f = dlgDone; dlgDone = null; f(val); }
 }
 function dialog({ title, text, input, okLabel, danger, required }) {
+  const oldChips = document.getElementById('dlgChips');
+  if (oldChips) oldChips.remove();
   return new Promise(resolve => {
     $('dlgTitle').textContent = title;
     $('dlgText').textContent = text || '';
@@ -303,7 +309,15 @@ $('dlgCancel').addEventListener('click', () => closeDlg(null));
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { if (!$('dlg').classList.contains('hidden')) closeDlg(null); $('lightbox').classList.add('hidden'); }
 });
-const askReason = (title, okLabel, danger = true) => dialog({ title, input: 'Причина', okLabel, danger, required: true });
+const PHOTO_REASONS = ['Низька якість фото', 'Дублікат', 'Невірне підприємство або борт. №', 'Порушення правил сайту', 'Реклама / водяні знаки', 'Не транспорт'];
+const askReason = (title, okLabel, danger = true, templates) => {
+  const p = dialog({ title, input: 'Причина', okLabel, danger, required: true });
+  if (templates && templates.length) {
+    $('dlgInput').insertAdjacentElement('afterend', el('div', { id: 'dlgChips', style: 'display:flex;gap:6px;flex-wrap:wrap;margin-top:8px' },
+      ...templates.map(t => el('button', { type: 'button', class: 'btn small', onclick: () => { $('dlgInput').value = t; $('dlgInput').focus(); } }, t))));
+  }
+  return p;
+};
 const askConfirm = (title, text, okLabel, danger) => dialog({ title, text, okLabel, danger });
 
 function downloadCsv(name, rows) {
@@ -459,6 +473,7 @@ const PAGES = [
   { id: 'users', ico: '👥', title: 'Акаунти', min: 'admin', render: pgUsers },
   { id: 'cities', ico: '🏙️', title: 'Міста', min: 'admin', render: pgCities, badge: 'cities' },
   { id: 'photos', ico: '📷', title: 'Фото', min: 'photomod', render: pgPhotos, badge: 'photos' },
+  { id: 'authors', ico: '📸', title: 'Автори', min: 'photomod', render: pgAuthors },
   { id: 'comments', ico: '💬', title: 'Коментарі', min: 'photomod', render: pgComments },
   { id: 'reports', ico: '🚩', title: 'Скарги', min: 'photomod', render: pgReports, badge: 'reports' },
   { id: 'broadcast', ico: '📣', title: 'Оголошення', min: 'admin', render: pgBroadcast },
@@ -528,6 +543,7 @@ async function pgOverview(tok) {
     count('photo_comments')
   ]);
   const repOpen = await count('reports', q => q.eq('status', 'open'));
+  const [vTot, vAct, eTot] = await Promise.all([count('vehicles'), count('vehicles', q => q.eq('status', 'active')), count('enterprises')]);
   const [logRes, usrRes] = await Promise.all([
     db.from('staff_log').select('*').order('created_at', { ascending: false }).limit(8),
     db.from('profiles').select('id, username, avatar_url, role, created_at').order('created_at', { ascending: false }).limit(8)
@@ -541,16 +557,60 @@ async function pgOverview(tok) {
   const usrRows = (usrRes.data || []).map(u => el('div', { class: 'row' },
     el('img', { class: 'avatar', src: u.avatar_url || PLACEHOLDER, alt: '' }),
     el('div', { class: 'info' }, el('p', null, userLink(u.id, u.username)), el('p', { class: 'sub' }, fmtDate(u.created_at)))));
+  const covPanel = el('div', { class: 'panel' }, el('h3', null, '📷 Покриття фото за містами'), el('div', { class: 'empty' }, 'Завантаження…'));
+  const topPanel = el('div', { class: 'panel' }, el('h3', null, '🏆 Топ фотографів за 30 днів'), el('div', { class: 'empty' }, 'Завантаження…'));
   show(
     el('div', { class: 'cards' },
       stat(users, 'Користувачів'), stat(banned, 'Заблоковано'), stat(cPub, 'Міст опубліковано'),
       stat(cPend, 'Міст на модерації', true), stat(cDraft, 'Чернеток міст'), stat(phOk, 'Фото схвалено'),
-      stat(phPend, 'Фото на модерації', true), stat(repOpen, 'Скарг відкрито', true), stat(cmts, 'Коментарів')),
+      stat(phPend, 'Фото на модерації', true), stat(repOpen, 'Скарг відкрито', true), stat(cmts, 'Коментарів'),
+      stat(vTot, 'Транспорту в базі'), stat(vAct, 'У експлуатації'), stat(eTot, 'Підприємств')),
     serV ? chartPanel('Відвідування сайту, 14 днів', serV) : null,
     el('div', { class: 'cols' }, chartPanel('Нові користувачі, 14 днів', serU), chartPanel('Нові фото, 14 днів', serP)),
+    el('div', { class: 'cols' }, covPanel, topPanel),
     el('div', { class: 'cols' },
       el('div', { class: 'panel' }, el('h3', null, 'Останні дії персоналу'), logRows.length ? logRows : el('div', { class: 'empty' }, 'Поки порожньо')),
       el('div', { class: 'panel' }, el('h3', null, 'Останні реєстрації'), usrRows.length ? usrRows : el('div', { class: 'empty' }, 'Поки порожньо'))));
+  fillOverviewExtras(tok, covPanel, topPanel);
+}
+
+
+async function fillOverviewExtras(tok, covPanel, topPanel) {
+  try {
+    const since = Date.now() - 30 * 864e5;
+    const [vs, ps, cs] = await Promise.all([
+      fetchAllA('vehicles', 'city_id, enterprise_id, fleet_no, status', q => q, 30000),
+      fetchAllA('photos', 'city_id, enterprise_id, fleet_no, owner_id, owner_name, views, created_at', q => q.eq('status', 'approved'), 50000),
+      db.from('cities').select('id, name').then(r => r.data || [])
+    ]);
+    if (stale(tok)) return;
+    const OLD = ['unknown', 'written_off', 'rebuilt', 'renumbered', 'plate_changed'];
+    const have = new Set(ps.map(p => p.enterprise_id + '|' + String(p.fleet_no || '').trim()));
+    const per = {};
+    vs.filter(v => !OLD.includes(v.status)).forEach(v => {
+      const c = per[v.city_id] = per[v.city_id] || { total: 0, ph: 0 };
+      c.total++;
+      if (have.has(v.enterprise_id + '|' + String(v.fleet_no).trim())) c.ph++;
+    });
+    const nm = Object.fromEntries(cs.map(c => [c.id, c.name]));
+    const rows = Object.entries(per).sort((a, b) => b[1].total - a[1].total).slice(0, 8).map(([id, c]) => {
+      const pct = Math.round((c.ph / c.total) * 100);
+      return el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, el('b', null, nm[id] || '—'), el('span', { class: 'sub' }, ' · ' + c.ph + ' з ' + c.total + ' (' + pct + '%)')),
+        el('div', { style: 'height:6px;border-radius:4px;background:var(--panel2);margin-top:6px;overflow:hidden' }, el('i', { style: 'display:block;height:100%;width:' + pct + '%;background:var(--ok)' }))));
+    });
+    covPanel.replaceChildren(el('h3', null, '📷 Покриття фото за містами'), ...(rows.length ? rows : [el('div', { class: 'empty' }, 'Транспорту ще немає')]));
+    const m = new Map();
+    ps.filter(p => new Date(p.created_at).getTime() >= since).forEach(p => {
+      const a = m.get(p.owner_id) || { id: p.owner_id, name: p.owner_name, n: 0, views: 0 };
+      a.n++; a.views += Number(p.views) || 0; m.set(p.owner_id, a);
+    });
+    const top = [...m.values()].sort((a, b) => b.n - a.n).slice(0, 5);
+    topPanel.replaceChildren(el('h3', null, '🏆 Топ фотографів за 30 днів'), ...(top.length ? top.map((a, i) => el('div', { class: 'row' },
+      el('b', null, ['🥇', '🥈', '🥉'][i] || (i + 1)), el('div', { class: 'info' }, el('p', null, userLink(a.id, a.name)), el('p', { class: 'sub' }, a.n + ' фото · 👁 ' + a.views)))) : [el('div', { class: 'empty' }, 'За 30 днів нових фото немає')]));
+  } catch (e) {
+    covPanel.replaceChildren(el('h3', null, '📷 Покриття фото за містами'), el('div', { class: 'empty' }, String(e.message || e)));
+    topPanel.replaceChildren(el('h3', null, '🏆 Топ фотографів за 30 днів'), el('div', { class: 'empty' }, '—'));
+  }
 }
 
 /* ============================ АКАУНТИ ============================ */
@@ -795,16 +855,32 @@ async function cityDelete(c) {
 }
 
 /* ============================ ФОТО ============================ */
-const photosState = { tab: 'pending', limit: 48, sel: new Set() };
+const photosState = { tab: 'pending', limit: 48, sel: new Set(), city: '', q: '' };
+let photoCursor = -1;
+function photosQuery(st) {
+  let q = db.from('photos').select('*').eq('status', st.tab);
+  if (st.city) q = q.eq('city_id', st.city);
+  if (st.q) q = q.ilike('owner_name', '%' + escLike(st.q) + '%');
+  return q.order('created_at', { ascending: st.tab === 'pending' }).limit(st.limit);
+}
+function markPhoto(i) {
+  const cards = [...document.querySelectorAll('#main .pcard')];
+  cards.forEach(c => c.classList.remove('kfocus'));
+  if (!cards.length) { photoCursor = -1; return; }
+  photoCursor = Math.max(0, Math.min(cards.length - 1, i));
+  cards[photoCursor].classList.add('kfocus');
+  cards[photoCursor].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
 
 async function pgPhotos(tok) {
   const st = photosState;
   const [cPend, cOk, res] = await Promise.all([
     count('photos', q => q.eq('status', 'pending')),
     count('photos', q => q.eq('status', 'approved')),
-    db.from('photos').select('*').eq('status', st.tab).order('created_at', { ascending: st.tab === 'pending' }).limit(st.limit)
+    photosQuery(st)
   ]);
   const authors = await usersMap((res.data || []).map(p => p.owner_id));
+  const cityList = ((await db.from('cities').select('id, name').order('name')).data) || [];
   if (stale(tok)) return;
   const tabs = el('div', { class: 'tabs' },
     el('button', { class: 'tab' + (st.tab === 'pending' ? ' active' : ''), onclick: () => { st.tab = 'pending'; st.limit = 48; pgPhotos(++renderTok); } }, 'На модерації' + (cPend != null ? ' (' + cPend + ')' : '')),
@@ -812,7 +888,9 @@ async function pgPhotos(tok) {
   const items = res.data || [];
   st.sel = new Set([...st.sel].filter(id => items.some(p => p.id === id)));
   const bulkBtn = el('button', { class: 'btn ok hidden', type: 'button' });
-  const refreshBulk = () => { bulkBtn.textContent = '✔ Схвалити вибрані (' + st.sel.size + ')'; bulkBtn.classList.toggle('hidden', !st.sel.size); };
+  const rejBtn = el('button', { class: 'btn danger hidden', type: 'button' });
+  const refreshBulk = () => { bulkBtn.textContent = '✔ Схвалити вибрані (' + st.sel.size + ')'; bulkBtn.classList.toggle('hidden', !st.sel.size); rejBtn.textContent = '🗑 Відхилити вибрані (' + st.sel.size + ')'; rejBtn.classList.toggle('hidden', !st.sel.size); };
+  rejBtn.addEventListener('click', () => bulkReject(items.filter(p => st.sel.has(p.id))));
   bulkBtn.addEventListener('click', () => bulkApprove(items.filter(p => st.sel.has(p.id))));
   const cards = items.map(p => {
     const url = phUrl(p);
@@ -840,9 +918,15 @@ async function pgPhotos(tok) {
     refreshBulk();
   } }, 'Вибрати всі / зняти') : null;
   refreshBulk();
-  show(tabs, selectAll ? el('div', { class: 'toolbar' }, selectAll, bulkBtn) : null, res.error ? el('div', { class: 'empty' }, res.error.message) :
+  const citySel = el('select', { class: 'input', style: 'max-width:220px' }, el('option', { value: '' }, 'Усі міста'), ...cityList.map(c => el('option', { value: c.id, selected: st.city === c.id }, c.name)));
+  citySel.addEventListener('change', () => { st.city = citySel.value; st.limit = 48; photoCursor = -1; pgPhotos(++renderTok); });
+  const authorIn = el('input', { class: 'input', placeholder: 'Автор (нік)…', value: st.q, style: 'max-width:200px' });
+  authorIn.addEventListener('input', () => { clearTimeout(authorIn._t); authorIn._t = setTimeout(() => { st.q = authorIn.value.trim(); st.limit = 48; photoCursor = -1; pgPhotos(++renderTok); }, 350); });
+  const keyHint = st.tab === 'pending' && items.length ? el('p', { class: 'sub keyhint' }, '⌨ ← → (або J K): вибір картки · A: схвалити · R: відхилити · Пробіл: виділити · Enter: збільшити') : null;
+  show(tabs, el('div', { class: 'toolbar' }, citySel, authorIn), keyHint, selectAll ? el('div', { class: 'toolbar' }, selectAll, bulkBtn, rejBtn) : null, res.error ? el('div', { class: 'empty' }, res.error.message) :
     cards.length ? el('div', { class: 'grid' }, ...cards) : el('div', { class: 'panel' }, el('div', { class: 'empty' }, 'Тут порожньо')),
     cards.length >= st.limit ? el('div', { class: 'more' }, el('button', { class: 'btn', onclick: () => { st.limit += 48; pgPhotos(++renderTok); } }, 'Показати ще')) : null);
+  if (photoCursor >= 0) setTimeout(() => markPhoto(photoCursor), 0);
 }
 
 async function photoApprove(p) {
@@ -867,8 +951,25 @@ async function bulkApprove(list) {
   toast('Схвалено: ' + ok + (fail ? ' · помилки: ' + fail : ''), fail ? 'err' : '');
   refreshBadges(); pgPhotos(++renderTok);
 }
+async function bulkReject(list) {
+  if (!list.length) return;
+  const reason = await askReason('Відхилити ' + list.length + ' фото?', 'Відхилити', true, PHOTO_REASONS);
+  if (reason == null) return;
+  let ok = 0; let fail = '';
+  for (const p of list) {
+    const err = await del('photos', p.id);
+    if (err) { fail = err; continue; }
+    ok++;
+    try { await db.storage.from('photos').remove([p.path, p.thumb_path].filter(Boolean)); } catch (e) { /* файл можна прибрати пізніше */ }
+    await logAction('photo_reject', p.city_name, reason);
+    await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» відхилено. Причина: ' + reason);
+  }
+  photosState.sel.clear();
+  toast('Відхилено: ' + ok + (fail ? ' · помилки: ' + fail : ''), fail ? 'err' : '');
+  refreshBadges(); pgPhotos(++renderTok);
+}
 async function photoReject(p, title, okLabel) {
-  const reason = await askReason(title, okLabel);
+  const reason = await askReason(title, okLabel, true, PHOTO_REASONS);
   if (reason == null) return;
   const err = await del('photos', p.id);
   if (err) { toast(err, 'err'); return; }
@@ -876,6 +977,54 @@ async function photoReject(p, title, okLabel) {
   await logAction('photo_reject', p.city_name, reason);
   await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» відхилено. Причина: ' + reason);
   toast('Фото видалено'); refreshBadges(); pgPhotos(++renderTok);
+}
+
+document.addEventListener('keydown', e => {
+  if (!me || location.hash !== '#photos' || e.ctrlKey || e.metaKey || e.altKey) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (/INPUT|TEXTAREA|SELECT/.test(tag) || !$('dlg').classList.contains('hidden') || document.querySelector('.dlg.xm') || !$('lightbox').classList.contains('hidden')) return;
+  const cards = [...document.querySelectorAll('#main .pcard')];
+  if (!cards.length) return;
+  const k = e.key.toLowerCase();
+  if (k === 'arrowright' || k === 'j') { e.preventDefault(); markPhoto(photoCursor + 1); }
+  else if (k === 'arrowleft' || k === 'k') { e.preventDefault(); markPhoto(photoCursor - 1); }
+  else if (photoCursor >= 0 && cards[photoCursor]) {
+    const c = cards[photoCursor];
+    if (k === 'a') { const b = c.querySelector('.btn.ok'); if (b) b.click(); }
+    else if (k === 'r') { const b = c.querySelector('.btn.danger'); if (b) b.click(); }
+    else if (k === ' ') { e.preventDefault(); const b = c.querySelector('.pick input'); if (b) b.click(); }
+    else if (k === 'enter' || k === 'z') { const b = c.querySelector('img.ph'); if (b) b.click(); }
+  }
+});
+
+
+/* ============================ АВТОРИ ============================ */
+const au = { sort: 'approved', dir: -1, q: '' };
+async function pgAuthors(tok) {
+  let rows;
+  try { rows = await fetchAllA('photos', 'owner_id, owner_name, status, views, created_at', q => q, 50000); } catch (e) { show(el('div', { class: 'panel' }, el('div', { class: 'empty' }, e.message))); return; }
+  if (stale(tok)) return;
+  const m = new Map();
+  rows.forEach(p => {
+    const a = m.get(p.owner_id) || { id: p.owner_id, name: p.owner_name || 'Автор', approved: 0, pending: 0, views: 0, last: '' };
+    if (p.status === 'approved') a.approved++; else a.pending++;
+    a.views += Number(p.views) || 0;
+    if (String(p.created_at) > a.last) a.last = String(p.created_at);
+    m.set(p.owner_id, a);
+  });
+  const f = au.q.toLowerCase();
+  const list = [...m.values()].filter(a => !f || String(a.name).toLowerCase().includes(f)).sort((a, b) => (a[au.sort] > b[au.sort] ? 1 : a[au.sort] < b[au.sort] ? -1 : 0) * au.dir);
+  const search = el('input', { class: 'input', placeholder: 'Пошук за ніком…', value: au.q });
+  search.addEventListener('input', () => { clearTimeout(search._t); search._t = setTimeout(() => { au.q = search.value.trim(); pgAuthors(++renderTok); }, 300); });
+  const th = (label, key) => el('button', { class: 'btn small' + (au.sort === key ? ' primary' : ''), onclick: () => { au.dir = au.sort === key ? -au.dir : -1; au.sort = key; pgAuthors(++renderTok); } }, label + (au.sort === key ? (au.dir > 0 ? ' ▲' : ' ▼') : ''));
+  show(
+    el('div', { class: 'cards' }, el('div', { class: 'stat' }, el('b', null, m.size), el('span', null, 'авторів')), el('div', { class: 'stat' }, el('b', null, rows.length.toLocaleString('uk-UA')), el('span', null, 'фото всього')),
+      el('div', { class: 'stat' }, el('b', null, rows.reduce((a, p) => a + (Number(p.views) || 0), 0).toLocaleString('uk-UA')), el('span', null, 'переглядів'))),
+    el('div', { class: 'toolbar' }, search, el('span', { class: 'sub' }, 'Сортувати:'), th('Схвалені', 'approved'), th('На модерації', 'pending'), th('Перегляди', 'views'), th('Остання', 'last'), th('Нік', 'name'),
+      el('button', { class: 'btn', onclick: () => downloadCsv('authors.csv', [['Нік', 'Схвалено', 'На модерації', 'Перегляди', 'Остання публікація']].concat(list.map(a => [a.name, a.approved, a.pending, a.views, a.last]))) }, '⬇ CSV')),
+    el('div', { class: 'panel' }, list.length ? list.slice(0, 200).map((a, i) => el('div', { class: 'row' },
+      el('b', { style: 'min-width:34px' }, i + 1), el('div', { class: 'info' }, el('p', null, userLink(a.id, a.name)), el('p', { class: 'sub' }, 'Остання: ' + (a.last ? fmtDate(a.last) : '—'))),
+      el('div', { class: 'acts' }, el('span', { class: 'tag ok' }, a.approved + ' схвалено'), a.pending ? el('span', { class: 'tag' }, a.pending + ' на модерації') : null, el('span', { class: 'tag' }, '👁 ' + a.views)))) : el('div', { class: 'empty' }, 'Авторів не знайдено')));
 }
 
 /* ============================ КОМЕНТАРІ ============================ */
@@ -1463,16 +1612,22 @@ async function pgBroadcast(tok) {
 }
 
 /* ============================ ЖУРНАЛ ============================ */
-const logState = { action: 'all', q: '' };
+const logState = { action: 'all', q: '', period: 'all', actor: '' };
 
 async function pgLog(tok) {
   const st = logState;
-  let q = db.from('staff_log').select('*').order('created_at', { ascending: false }).limit(300);
+  let q = db.from('staff_log').select('*').order('created_at', { ascending: false }).limit(500);
   if (st.action !== 'all') q = q.eq('action', st.action);
+  if (st.period !== 'all') q = q.gte('created_at', new Date(Date.now() - Number(st.period) * 36e5).toISOString());
   const { data, error } = await q;
   if (stale(tok)) return;
   const f = st.q.toLowerCase();
-  const list = (data || []).filter(x => !f || [x.actor_name, x.city_name, x.reason, LOG_LABELS[x.action]].some(v => String(v || '').toLowerCase().includes(f)));
+  const actors = [...new Set((data || []).map(x => x.actor_name).filter(Boolean))].sort();
+  const list = (data || []).filter(x => (!st.actor || x.actor_name === st.actor) && (!f || [x.actor_name, x.city_name, x.reason, LOG_LABELS[x.action]].some(v => String(v || '').toLowerCase().includes(f))));
+  const perSel = el('select', { class: 'input', style: 'max-width:170px' }, ...[['all', 'За весь час'], ['24', 'Останні 24 години'], ['168', 'Останні 7 днів'], ['720', 'Останні 30 днів']].map(([k, l]) => el('option', { value: k, selected: st.period === k }, l)));
+  perSel.addEventListener('change', () => { st.period = perSel.value; pgLog(++renderTok); });
+  const actSel = el('select', { class: 'input', style: 'max-width:190px' }, el('option', { value: '' }, 'Усі виконавці'), ...actors.map(a => el('option', { value: a, selected: st.actor === a }, a)));
+  actSel.addEventListener('change', () => { st.actor = actSel.value; pgLog(++renderTok); });
   const sel = el('select', { class: 'input', style: 'max-width:240px' },
     el('option', { value: 'all' }, 'Усі дії'),
     ...Object.entries(LOG_LABELS).map(([k, l]) => el('option', { value: k, selected: st.action === k }, l)));
@@ -1481,7 +1636,7 @@ async function pgLog(tok) {
   search.addEventListener('input', () => { st.q = search.value.trim(); clearTimeout(search._t); search._t = setTimeout(() => pgLog(++renderTok), 300); });
   const csvBtn = el('button', { class: 'btn', onclick: () => downloadCsv('log.csv', [['дата', 'хто', 'дія', 'об’єкт', 'причина/текст']]
     .concat(list.map(x => [x.created_at, x.actor_name, LOG_LABELS[x.action] || x.action, x.city_name, x.reason])) ) }, '⬇️ CSV');
-  show(el('div', { class: 'toolbar' }, sel, search, csvBtn),
+  show(el('div', { class: 'toolbar' }, sel, perSel, actSel, search, csvBtn),
     el('div', { class: 'panel' }, error ? el('div', { class: 'empty' }, error.message) : list.length ? list.map(x =>
       el('div', { class: 'row' }, el('div', { class: 'info' },
         el('p', null, el('b', null, x.actor_name || 'Невідомий'), ' ' + (LOG_LABELS[x.action] || x.action) + (x.city_name ? ' «' + x.city_name + '»' : '')),
@@ -1828,6 +1983,51 @@ async function pgHealth(tok) {
     check('Фото на модерації понад 7 днів', oldPending, p => el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, el('b', null, p.fleet_no || 'без номера'), ' · ' + (p.model || '')), el('p', { class: 'sub' }, (cName[p.city_id] || '') + ' · ' + fmtDate(p.created_at)))), 'Немає застарілих заявок', 'розгляньте на сторінці «Фото»'),
     check('Схожі назви моделей (імовірні дублі)', similar, g => el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, g.map(m => '«' + m + '» (' + mc[m] + ')').join(' ≈ '))), el('div', { class: 'acts' }, el('a', { class: 'btn small', href: '#models' }, 'До «Моделі»'))), 'Назви моделей уніфіковані', 'об’єднайте на сторінці «Моделі»'));
 }
+
+
+/* ============================ ШВИДКИЙ ПОШУК (Ctrl+K або /) ============================ */
+function openPalette() {
+  if (!me || document.querySelector('.dlg.xm.pal')) return;
+  const inp = el('input', { class: 'input', placeholder: 'Сторінка, номер ТЗ, нік автора…', autocomplete: 'off' });
+  const list = el('div', { style: 'margin-top:10px;display:grid;gap:4px' });
+  const ov = xModal([inp, list], 560);
+  ov.classList.add('pal');
+  ov.firstElementChild.style.marginTop = '8vh';
+  let items = []; let idx = 0; let timer;
+  const draw = () => list.replaceChildren(...items.map((it, i) => el('button', { class: 'btn' + (i === idx ? ' primary' : ''), style: 'justify-content:flex-start;text-align:left;overflow-wrap:anywhere', onclick: () => run(it) }, it.label)));
+  const run = it => { ov.remove(); it.go(); };
+  const goVeh = q => { Object.assign(vh, { q, city: '', ent: '', status: '', type: '', issue: '', page: 0 }); vh.sel.clear(); if (location.hash === '#vehicles') route(); else location.hash = '#vehicles'; };
+  const search = async () => {
+    const q = inp.value.trim().toLowerCase();
+    const pages = PAGES.filter(allowed).filter(p => !q || p.title.toLowerCase().includes(q)).map(p => ({ label: p.ico + ' ' + p.title, go: () => { location.hash = '#' + p.id; } }));
+    items = pages.slice(0, 8); idx = 0; draw();
+    if (q.length < 2) return;
+    const s = escLike(q).replace(/[,()"]/g, ' ');
+    const [v, u] = await Promise.all([
+      db.from('vehicles').select('id, fleet_no, plate_no, model').or('fleet_no.ilike.%' + s + '%,plate_no.ilike.%' + s + '%,vin.ilike.%' + s + '%').limit(6),
+      db.from('profiles').select('id, username, role').ilike('username', '%' + s + '%').limit(5)
+    ]);
+    if (inp.value.trim().toLowerCase() !== q) return;
+    items = [...pages.slice(0, 5),
+      ...(v.data || []).map(x => ({ label: '🚌 ' + x.fleet_no + ' · ' + x.model + (x.plate_no ? ' · ' + x.plate_no : ''), go: () => goVeh(x.fleet_no) })),
+      ...(u.data || []).map(x => ({ label: '👤 ' + x.username + ' (' + x.role + ')', go: () => { usersState.q = x.username; usersState.role = 'all'; usersState.limit = 50; if (location.hash === '#users') route(); else location.hash = '#users'; } }))];
+    idx = 0; draw();
+  };
+  inp.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 200); });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); draw(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(0, idx - 1); draw(); }
+    else if (e.key === 'Enter' && items[idx]) run(items[idx]);
+  });
+  search();
+  inp.focus();
+}
+document.addEventListener('keydown', e => {
+  if (!me) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+  else if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '') && $('dlg').classList.contains('hidden') && !document.querySelector('.dlg.xm')) { e.preventDefault(); openPalette(); }
+});
+$('palBtn').addEventListener('click', openPalette);
 
 /* ============================ СТАРТ ============================ */
 (async function boot() {
