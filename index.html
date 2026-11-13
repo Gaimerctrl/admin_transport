@@ -240,7 +240,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -474,6 +474,7 @@ const PAGES = [
   { id: 'cities', ico: '🏙️', title: 'Міста', min: 'admin', render: pgCities, badge: 'cities' },
   { id: 'photos', ico: '📷', title: 'Фото', min: 'photomod', render: pgPhotos, badge: 'photos' },
   { id: 'authors', ico: '📸', title: 'Автори', min: 'photomod', render: pgAuthors },
+  { id: 'points', ico: '🏅', title: 'Бали', min: 'admin', render: pgPoints },
   { id: 'comments', ico: '💬', title: 'Коментарі', min: 'photomod', render: pgComments },
   { id: 'reports', ico: '🚩', title: 'Скарги', min: 'photomod', render: pgReports, badge: 'reports' },
   { id: 'broadcast', ico: '📣', title: 'Оголошення', min: 'admin', render: pgBroadcast },
@@ -930,23 +931,48 @@ async function pgPhotos(tok) {
   if (photoCursor >= 0) setTimeout(() => markPhoto(photoCursor), 0);
 }
 
+let rulesCacheA;
+async function getRulesA() {
+  if (rulesCacheA !== undefined) return rulesCacheA;
+  const r = await db.from('points_rules').select('key, points');
+  rulesCacheA = (r.error || !(r.data || []).length) ? null : Object.fromEntries(r.data.map(x => [x.key, Number(x.points)]));
+  return rulesCacheA;
+}
+/* скільки балів принесе схвалення фото (перше фото машини дає бонус) */
+async function approvalPoints(p, seen) {
+  const r = await getRulesA();
+  if (!r || r.photo == null) return null;
+  let pts = r.photo;
+  const fn = String(p.fleet_no || '').trim();
+  if (p.enterprise_id && fn) {
+    const key = p.enterprise_id + '|' + fn;
+    const { count, error } = await db.from('photos').select('id', { count: 'exact', head: true }).eq('status', 'approved').eq('enterprise_id', p.enterprise_id).eq('fleet_no', p.fleet_no);
+    if (!error && count === 0 && !(seen && seen.has(key))) pts += r.first || 0;
+    if (seen) seen.add(key);
+  }
+  return pts;
+}
+const ptsTail = pts => (pts ? '. Ви отримали +' + pts + ' балів' : '');
 async function photoApprove(p) {
+  const pts = await approvalPoints(p);
   const err = await upd('photos', { status: 'approved' }, p.id);
   if (err) { toast(err, 'err'); return; }
   await logAction('photo_approve', p.city_name, p.enterprise_name);
-  await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» прийнято і опубліковано');
+  await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» прийнято і опубліковано' + ptsTail(pts));
   toast('Фото схвалено'); refreshBadges(); pgPhotos(++renderTok);
 }
 async function bulkApprove(list) {
   if (!list.length) return;
   if (!(await askConfirm('Схвалити ' + list.length + ' фото?', 'Автори отримають сповіщення про публікацію.', 'Схвалити', false))) return;
   let ok = 0, fail = '';
-  for (const p of list) {
+  const seen = new Set();
+  for (const p of [...list].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))) {
+    const pts = await approvalPoints(p, seen);
     const err = await upd('photos', { status: 'approved' }, p.id);
     if (err) { fail = err; continue; }
     ok++;
     await logAction('photo_approve', p.city_name, p.enterprise_name);
-    await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» прийнято і опубліковано');
+    await notify(p.owner_id, 'Ваше фото (' + (p.enterprise_name || '') + ') у місті «' + (p.city_name || '') + '» прийнято і опубліковано' + ptsTail(pts));
   }
   photosState.sel.clear();
   toast('Схвалено: ' + ok + (fail ? ' · помилки: ' + fail : ''), fail ? 'err' : '');
@@ -999,6 +1025,49 @@ document.addEventListener('keydown', e => {
 });
 
 
+
+/* ============================ БАЛИ ============================ */
+const ADM_LEVELS = [[0, '🌱', 'Новачок'], [50, '📷', 'Любитель'], [150, '🎞️', 'Фотограф'], [400, '🏅', 'Досвідчений'], [800, '🏆', 'Майстер'], [1500, '💎', 'Експерт'], [3000, '👑', 'Легенда']];
+const admLevel = p => { let c = ADM_LEVELS[0]; ADM_LEVELS.forEach(l => { if (Number(p) >= l[0]) c = l; }); return c[1] + ' ' + c[2]; };
+const fmtN = n => (Math.round(Number(n || 0) * 10) / 10).toLocaleString('uk-UA');
+
+async function pgPoints(tok) {
+  const [rulesRes, boardRes] = await Promise.all([db.from('points_rules').select('*').order('sort'), db.rpc('points_board', { p_days: null, p_limit: 30 })]);
+  if (stale(tok)) return;
+  if (rulesRes.error) {
+    show(el('div', { class: 'panel' }, el('div', { style: 'padding:16px' }, el('b', null, 'Систему балів ще не підключено.'),
+      el('p', null, 'У Supabase → SQL Editor виконайте файл ', el('code', null, 'points.sql'), ', потім оновіть сторінку.'), el('p', { class: 'err' }, rulesRes.error.message))));
+    return;
+  }
+  const ruleRows = (rulesRes.data || []).map(r => {
+    const pIn = el('input', { class: 'input', type: 'number', min: 0, step: '0.5', value: r.points, style: 'max-width:100px' });
+    const cIn = el('input', { class: 'input', type: 'number', min: 0, step: '1', value: r.cap == null ? '' : r.cap, placeholder: 'без ліміту', style: 'max-width:120px' });
+    const msg = el('span', { class: 'sub' });
+    const save = el('button', { class: 'btn small primary', onclick: async () => {
+      const points = Number(pIn.value); const cap = cIn.value.trim() === '' ? null : Number(cIn.value);
+      if (!(points >= 0) || (cap != null && !(cap >= 0))) { msg.className = 'err'; msg.textContent = 'Невірне число'; return; }
+      const { data, error } = await db.from('points_rules').update({ points, cap }).eq('key', r.key).select('key');
+      if (error || !(data || []).length) { msg.className = 'err'; msg.textContent = error ? error.message : 'Немає прав'; return; }
+      rulesCacheA = undefined;
+      await logAction('points_rules', null, r.label + ': ' + points + (cap != null ? ' (ліміт ' + cap + ')' : ''));
+      msg.className = 'sub'; msg.textContent = '✓ збережено'; toast('Правило збережено, бали перераховано');
+    } }, 'Зберегти');
+    return el('div', { class: 'row' }, el('div', { class: 'info' }, el('p', null, el('b', null, r.label)), el('p', { class: 'sub' }, r.note || '')),
+      el('div', { class: 'acts' }, el('label', { class: 'sub' }, 'Балів ', pIn), el('label', { class: 'sub' }, 'Ліміт ', cIn), save, msg));
+  });
+  const board = boardRes.error ? [] : (boardRes.data || []);
+  show(
+    el('div', { class: 'panel' }, el('h3', null, '⚙️ Правила нарахування'), ruleRows,
+      el('div', { class: 'row' }, el('div', { class: 'info sub' }, 'Бали не зберігаються, а рахуються з даних (фото, вподобання, обране, коментарі, перегляди). Зміна правила одразу перераховує всім. Вподобання й обране від самого автора, а також коментарі до власних фото не враховуються. Забанені користувачі в рейтингу не показуються.'))),
+    el('div', { class: 'panel' }, el('h3', null, '🏆 Рівні'), el('div', { class: 'row', style: 'flex-wrap:wrap' }, ...ADM_LEVELS.map(l => el('span', { class: 'tag', style: 'margin:2px 6px 2px 0;font-size:13px' }, l[1] + ' ' + l[2] + ' · від ' + l[0])))),
+    el('div', { class: 'panel' }, el('h3', null, '📊 Топ-30 за балами ', el('button', { class: 'btn small', style: 'float:right', onclick: () => downloadCsv('points.csv', [['Місце', 'Нік', 'Рівень', 'Бали', 'Фото', 'Перші фото', 'Вподобання', 'Обране', 'Коментарі', 'Перегляди']].concat(board.map(b => [b.rank, b.username, admLevel(b.points), b.points, b.photos, b.firsts, b.votes, b.favs, b.comments, b.views]))) }, '⬇ CSV')),
+      boardRes.error ? el('div', { class: 'empty' }, 'Рейтинг недоступний: ' + boardRes.error.message) : board.length ? board.map(b => el('div', { class: 'row' },
+        el('b', { style: 'min-width:34px' }, ['🥇', '🥈', '🥉'][b.rank - 1] || b.rank),
+        el('div', { class: 'info' }, el('p', null, userLink(b.user_id, b.username), el('span', { class: 'tag' }, admLevel(b.points))),
+          el('p', { class: 'sub' }, 'фото ' + b.photos + ' · перші ' + b.firsts + ' · 👍 ' + b.votes + ' · ⭐ ' + b.favs + ' · 💬 ' + b.comments + ' · 👁 ' + b.views)),
+        el('div', { class: 'acts' }, el('b', { style: 'font-size:18px' }, fmtN(b.points)), el('span', { class: 'sub' }, 'балів')))) : el('div', { class: 'empty' }, 'Балів ще ніхто не набрав')));
+}
+
 /* ============================ АВТОРИ ============================ */
 const au = { sort: 'approved', dir: -1, q: '' };
 async function pgAuthors(tok) {
@@ -1013,6 +1082,11 @@ async function pgAuthors(tok) {
     if (String(p.created_at) > a.last) a.last = String(p.created_at);
     m.set(p.owner_id, a);
   });
+  try {
+    const pb = await db.rpc('points_board', { p_days: null, p_limit: 1000 });
+    if (!pb.error) (pb.data || []).forEach(b => { const a = m.get(b.user_id); if (a) a.points = Number(b.points); });
+  } catch (e) { /* бали ще не підключено */ }
+  m.forEach(a => { if (a.points == null) a.points = 0; });
   const f = au.q.toLowerCase();
   const list = [...m.values()].filter(a => !f || String(a.name).toLowerCase().includes(f)).sort((a, b) => (a[au.sort] > b[au.sort] ? 1 : a[au.sort] < b[au.sort] ? -1 : 0) * au.dir);
   const search = el('input', { class: 'input', placeholder: 'Пошук за ніком…', value: au.q });
@@ -1021,11 +1095,11 @@ async function pgAuthors(tok) {
   show(
     el('div', { class: 'cards' }, el('div', { class: 'stat' }, el('b', null, m.size), el('span', null, 'авторів')), el('div', { class: 'stat' }, el('b', null, rows.length.toLocaleString('uk-UA')), el('span', null, 'фото всього')),
       el('div', { class: 'stat' }, el('b', null, rows.reduce((a, p) => a + (Number(p.views) || 0), 0).toLocaleString('uk-UA')), el('span', null, 'переглядів'))),
-    el('div', { class: 'toolbar' }, search, el('span', { class: 'sub' }, 'Сортувати:'), th('Схвалені', 'approved'), th('На модерації', 'pending'), th('Перегляди', 'views'), th('Остання', 'last'), th('Нік', 'name'),
+    el('div', { class: 'toolbar' }, search, el('span', { class: 'sub' }, 'Сортувати:'), th('Схвалені', 'approved'), th('На модерації', 'pending'), th('Бали', 'points'), th('Перегляди', 'views'), th('Остання', 'last'), th('Нік', 'name'),
       el('button', { class: 'btn', onclick: () => downloadCsv('authors.csv', [['Нік', 'Схвалено', 'На модерації', 'Перегляди', 'Остання публікація']].concat(list.map(a => [a.name, a.approved, a.pending, a.views, a.last]))) }, '⬇ CSV')),
     el('div', { class: 'panel' }, list.length ? list.slice(0, 200).map((a, i) => el('div', { class: 'row' },
       el('b', { style: 'min-width:34px' }, i + 1), el('div', { class: 'info' }, el('p', null, userLink(a.id, a.name)), el('p', { class: 'sub' }, 'Остання: ' + (a.last ? fmtDate(a.last) : '—'))),
-      el('div', { class: 'acts' }, el('span', { class: 'tag ok' }, a.approved + ' схвалено'), a.pending ? el('span', { class: 'tag' }, a.pending + ' на модерації') : null, el('span', { class: 'tag' }, '👁 ' + a.views)))) : el('div', { class: 'empty' }, 'Авторів не знайдено')));
+      el('div', { class: 'acts' }, a.points ? el('span', { class: 'tag', style: 'font-weight:800' }, '🏅 ' + fmtN(a.points)) : null, el('span', { class: 'tag ok' }, a.approved + ' схвалено'), a.pending ? el('span', { class: 'tag' }, a.pending + ' на модерації') : null, el('span', { class: 'tag' }, '👁 ' + a.views)))) : el('div', { class: 'empty' }, 'Авторів не знайдено')));
 }
 
 /* ============================ КОМЕНТАРІ ============================ */
