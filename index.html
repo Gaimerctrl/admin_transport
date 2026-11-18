@@ -240,7 +240,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів', points_adjust: 'нарахував або зняв бали', news_add: 'опублікував новину', news_edit: 'змінив новину', news_delete: 'видалив новину', warn: 'видав варн', unwarn: 'зняв варн', 'warn+autoban': 'видав варн (автобан)'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів', points_adjust: 'нарахував або зняв бали', badge_grant: 'видав досягнення', badge_revoke: 'забрав досягнення', news_add: 'опублікував новину', news_edit: 'змінив новину', news_delete: 'видалив новину', warn: 'видав варн', unwarn: 'зняв варн', 'warn+autoban': 'видав варн (автобан)'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -756,10 +756,31 @@ async function deleteAccount(u) {
 $('ucard').addEventListener('click', e => { if (e.target === $('ucard')) $('ucard').classList.add('hidden'); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('ucard').classList.add('hidden'); });
 
+function badgeForm(p) {
+  const ico = el('input', { class: 'input', style: 'width:70px', maxlength: 4, value: '🏅', title: 'Іконка (емодзі)' });
+  const title = el('input', { class: 'input', style: 'flex:1;min-width:160px', maxlength: 40, placeholder: 'Назва, напр. «Тролейбусний гуру»' });
+  const desc = el('input', { class: 'input', maxlength: 200, placeholder: 'Опис (необов’язково)', style: 'margin-top:6px' });
+  const msg = el('div', { class: 'err' });
+  const btn = el('button', { class: 'btn primary', type: 'button' }, 'Видати');
+  btn.addEventListener('click', async () => {
+    msg.style.color = '';
+    if (title.value.trim().length < 2) { msg.textContent = 'Вкажіть назву'; return; }
+    btn.disabled = true;
+    const r = await db.rpc('grant_badge', { target: p.id, b_icon: ico.value.trim() || '🏅', b_title: title.value.trim(), b_desc: desc.value.trim() || null });
+    btn.disabled = false;
+    if (r.error) { msg.textContent = r.error.message; return; }
+    toast('Досягнення видано'); openUserCard(p);
+  });
+  return el('div', { style: 'margin-top:8px' }, el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, ico, title, btn), desc, msg);
+}
+
 async function openUserCard(u) {
   const box = $('ucBody');
   box.replaceChildren(el('div', { class: 'empty' }, 'Завантаження…'));
   $('ucard').classList.remove('hidden');
+  const bq = await db.from('user_badges').select('*').eq('user_id', u.id).order('created_at');
+  const badgesOk = !bq.error;
+  const userBadges = bq.data || [];
   const wq = await db.from('user_warns').select('*').eq('user_id', u.id).order('created_at', { ascending: false });
   warnsOk = !wq.error;
   const userWarns = wq.data || [];
@@ -800,6 +821,17 @@ async function openUserCard(u) {
     p.contacts ? el('div', { class: 'sub' }, '✉️ ' + p.contacts) : null,
     el('div', { class: 'cards', style: 'margin-top:14px' },
       stat('Фото', s.photos), stat('Перегляди', s.views), stat('Рейтинг', rating), stat('Коментарі', s.comments), stat('Міста', s.cities)),
+    badgesOk ? el('h4', null, '🏅 Видані досягнення') : null,
+    badgesOk ? (userBadges.length ? userBadges.map(b => el('div', { class: 'cmt' },
+      el('b', null, (b.icon || '🏅') + ' ' + b.title), b.description ? ' — ' + b.description : '',
+      el('span', { class: 'sub' }, ' · ' + (b.granted_name || '?') + ', ' + fmtDate(b.created_at) + ' '),
+      canManage(p) ? el('button', { class: 'btn small', onclick: async () => {
+        if (!(await askConfirm('Забрати досягнення?', b.title, 'Забрати', true))) return;
+        const r = await db.rpc('revoke_badge', { badge_id: b.id });
+        if (r.error) { toast(r.error.message, 'err'); return; }
+        toast('Досягнення забрано'); openUserCard(u);
+      } }, 'забрати') : null)) : el('div', { class: 'sub' }, 'Немає')) : null,
+    badgesOk && canManage(p) ? badgeForm(p) : null,
     warnsOk ? el('h4', null, '⚠ Варни (' + userWarns.filter(w => !w.revoked).length + '/' + WARN_LIMIT + ')') : null,
     warnsOk ? (userWarns.length ? userWarns.map(w => el('div', { class: 'cmt', style: w.revoked ? 'opacity:.5' : '' },
       el('span', { class: 'sub' }, fmtDate(w.created_at) + ' · ' + (w.issued_by_name || '?') + ' · '), (w.revoked ? '[знято] ' : '') + w.reason,
