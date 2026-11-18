@@ -240,7 +240,7 @@ const LOG_LABELS = {
   photo_approve: 'прийняв фото', photo_reject: 'відхилив фото', delete_account: 'видалив акаунт',
   set_role: 'змінив ранг акаунта', comment_delete: 'видалив коментар',
   report_dismiss: 'відхилив скаргу', report_resolve: 'закрив скаргу', maintenance: 'змінив режим техробіт',
-  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів', points_adjust: 'нарахував або зняв бали'
+  word_add: 'додав заборонене слово', word_del: 'видалив заборонене слово', backup: 'створив резервну копію', import_vehicles: 'імпортував транспорт', vehicles_bulk: 'змінив транспорт (масово)', vehicle_edit: 'змінив транспорт', vehicle_delete: 'видалив транспорт', vehicle_create: 'створив транспорт', model_rename: 'перейменував модель', vehicle_revert: 'відкотив зміну транспорту', points_rules: 'змінив правила балів', points_adjust: 'нарахував або зняв бали', news_add: 'опублікував новину', news_edit: 'змінив новину', news_delete: 'видалив новину', warn: 'видав варн', unwarn: 'зняв варн', 'warn+autoban': 'видав варн (автобан)'
 };
 const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#cfd3d8"/><circle cx="32" cy="24" r="11" fill="#9aa0a6"/><path d="M10 64c2-17 12-24 22-24s20 7 22 24z" fill="#9aa0a6"/></svg>');
@@ -381,7 +381,7 @@ async function usersMap(ids) {
   const uniq = [...new Set(ids.filter(Boolean))];
   const map = {};
   for (let i = 0; i < uniq.length; i += 100) {
-    const { data } = await db.from('profiles').select('id, username, avatar_url, role').in('id', uniq.slice(i, i + 100));
+    const { data } = await db.from('profiles').select('id, username, avatar_url, role, banned').in('id', uniq.slice(i, i + 100));
     (data || []).forEach(p => { map[p.id] = p; });
   }
   return map;
@@ -471,12 +471,14 @@ try { const t = localStorage.getItem('admin-theme'); if (t) document.documentEle
 const PAGES = [
   { id: 'overview', ico: '📊', title: 'Огляд', min: 'admin', render: pgOverview },
   { id: 'users', ico: '👥', title: 'Акаунти', min: 'admin', render: pgUsers },
+  { id: 'warns', ico: '⚠️', title: 'Варни', min: 'admin', render: pgWarns },
   { id: 'cities', ico: '🏙️', title: 'Міста', min: 'admin', render: pgCities, badge: 'cities' },
   { id: 'photos', ico: '📷', title: 'Фото', min: 'photomod', render: pgPhotos, badge: 'photos' },
   { id: 'authors', ico: '📸', title: 'Автори', min: 'photomod', render: pgAuthors },
   { id: 'points', ico: '🏅', title: 'Бали', min: 'admin', render: pgPoints },
   { id: 'comments', ico: '💬', title: 'Коментарі', min: 'photomod', render: pgComments },
   { id: 'reports', ico: '🚩', title: 'Скарги', min: 'photomod', render: pgReports, badge: 'reports' },
+  { id: 'news', ico: '📰', title: 'Новини', min: 'admin', render: pgNews },
   { id: 'broadcast', ico: '📣', title: 'Оголошення', min: 'admin', render: pgBroadcast },
   { id: 'vehicles', ico: '🚌', title: 'Транспорт', min: 'admin', render: pgVehicles },
   { id: 'models', ico: '🏷️', title: 'Моделі', min: 'admin', render: pgModels },
@@ -625,20 +627,35 @@ function canManage(t) {
   return false;
 }
 
+let warnsMap = {};
+let warnsOk = false;
+const WARN_LIMIT = 3;
+
 async function pgUsers(tok) {
   const st = usersState;
   let q = db.from('profiles').select('*').order('created_at', { ascending: false }).limit(st.limit);
   if (st.q) q = q.ilike('username', '%' + escLike(st.q) + '%');
-  if (st.role === 'banned') q = q.eq('banned', true);
+  let warnedIds = null;
+  if (st.role === 'warned') {
+    const w = await db.from('user_warns').select('user_id').eq('revoked', false);
+    warnedIds = [...new Set((w.data || []).map(x => x.user_id))];
+    q = q.in('id', warnedIds.length ? warnedIds : ['00000000-0000-0000-0000-000000000000']);
+  }
+  else if (st.role === 'banned') q = q.eq('banned', true);
   else if (st.role !== 'all') q = q.eq('role', st.role);
   const { data, error } = await q;
+  if (stale(tok)) return;
+  warnsMap = {};
+  const wr = (data || []).length ? await db.from('user_warns').select('*').eq('revoked', false).in('user_id', data.map(u => u.id)).order('created_at') : { data: [] };
+  warnsOk = !wr.error;
+  (wr.data || []).forEach(w => { (warnsMap[w.user_id] = warnsMap[w.user_id] || []).push(w); });
   if (stale(tok)) return;
   const rows = (data || []).map(userRow);
   const search = el('input', { class: 'input', placeholder: 'Пошук за ніком…', value: st.q });
   let timer = null;
   search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { st.q = search.value.trim(); st.limit = 50; pgUsers(++renderTok); }, 350); });
   const roleSel = el('select', { class: 'input', style: 'max-width:200px' },
-    ...[['all', 'Усі'], ['owner', 'Власник'], ['admin', 'Адміни'], ['photomod', 'Фотомодератори'], ['user', 'Користувачі'], ['banned', 'Заблоковані']]
+    ...[['all', 'Усі'], ['owner', 'Власник'], ['admin', 'Адміни'], ['photomod', 'Фотомодератори'], ['user', 'Користувачі'], ['banned', 'Заблоковані'], ['warned', '⚠ З варнами']]
       .map(([v, l]) => el('option', { value: v, selected: st.role === v }, l)));
   roleSel.addEventListener('change', () => { st.role = roleSel.value; st.limit = 50; pgUsers(++renderTok); });
   show(
@@ -659,6 +676,7 @@ function userRow(u) {
     if (!roles.includes(u.role)) sel.prepend(el('option', { value: u.role, selected: true }, ROLE_LABEL[u.role]));
     sel.addEventListener('change', () => setRole(u, sel.value, sel));
     acts.append(sel,
+      warnsOk ? el('button', { class: 'btn small', onclick: () => giveWarn(u) }, '⚠ Варн') : null,
       el('button', { class: 'btn small' + (u.banned ? ' ok' : ''), onclick: () => toggleBan(u) }, u.banned ? 'Розблокувати' : 'Заблокувати'),
       el('button', { class: 'btn small danger', onclick: () => deleteAccount(u) }, 'Видалити'));
   }
@@ -668,7 +686,8 @@ function userRow(u) {
     el('div', { class: 'info' },
       el('p', null, userLink(u.id, u.username),
         ['owner', 'admin', 'photomod'].includes(u.role) ? el('span', { class: 'tag ' + u.role }, ROLE_LABEL[u.role]) : null,
-        u.banned ? el('span', { class: 'tag ban' }, 'БАН') : null),
+        u.banned ? el('span', { class: 'tag ban' }, 'БАН') : null,
+        warnsOk && (warnsMap[u.id] || []).length ? el('span', { class: 'tag', style: 'background:rgba(217,119,6,.18);color:var(--warn)' }, '⚠ ' + warnsMap[u.id].length + '/' + WARN_LIMIT) : null),
       el('p', { class: 'sub' }, 'Реєстрація: ' + fmtDate(u.created_at) + (u.banned && u.ban_reason ? ' · Причина бану: ' + u.ban_reason : ''))),
     acts);
 }
@@ -684,6 +703,24 @@ async function setRole(u, role, sel) {
   await notify(u.id, 'Ваш ранг змінено: ' + label);
   toast('Ранг змінено');
   pgUsers(++renderTok);
+}
+
+async function giveWarn(u) {
+  const reason = await askReason('Причина варну: ' + u.username, 'Видати варн', false,
+    ['Образи інших користувачів', 'Спам / реклама', 'Нерелевантні фото', 'Порушення правил сайту', 'Неповага до модераторів']);
+  if (reason == null) return;
+  const { data, error } = await db.rpc('give_warn', { target: u.id, warn_reason: reason });
+  if (error) { toast(error.message, 'err'); return; }
+  toast(data && data.banned ? 'Варн ' + data.count + '/' + data.limit + ': акаунт заблоковано автоматично' : 'Варн видано: ' + (data ? data.count + '/' + data.limit : ''));
+  pgUsers(++renderTok);
+}
+
+async function revokeWarn(w, after) {
+  if (!(await askConfirm('Зняти варн?', w.reason, 'Зняти', false))) return;
+  const { error } = await db.rpc('revoke_warn', { warn_id: w.id });
+  if (error) { toast(error.message, 'err'); return; }
+  toast('Варн знято');
+  if (after) after(); else pgUsers(++renderTok);
 }
 
 async function toggleBan(u) {
@@ -723,6 +760,9 @@ async function openUserCard(u) {
   const box = $('ucBody');
   box.replaceChildren(el('div', { class: 'empty' }, 'Завантаження…'));
   $('ucard').classList.remove('hidden');
+  const wq = await db.from('user_warns').select('*').eq('user_id', u.id).order('created_at', { ascending: false });
+  warnsOk = !wq.error;
+  const userWarns = wq.data || [];
   const [st, ph, cm, ct, full] = await Promise.all([
     db.rpc('profile_stats', { p_uid: u.id }),
     db.from('photos').select('*').eq('owner_id', u.id).order('created_at', { ascending: false }).limit(12),
@@ -743,6 +783,7 @@ async function openUserCard(u) {
   const acts = el('div', { class: 'acts', style: 'justify-content:flex-start;margin-top:18px' },
     el('a', { class: 'btn', href: SITE_URL + '#user=' + u.id, target: '_blank', rel: 'noopener' }, '🌐 Профіль на сайті'));
   if (canManage(p)) acts.append(
+    warnsOk ? el('button', { class: 'btn', onclick: () => { $('ucard').classList.add('hidden'); giveWarn(p); } }, '⚠ Видати варн') : null,
     el('button', { class: 'btn' + (p.banned ? ' ok' : ''), onclick: () => { $('ucard').classList.add('hidden'); toggleBan(p); } }, p.banned ? 'Розблокувати' : 'Заблокувати'),
     el('button', { class: 'btn danger', onclick: () => { $('ucard').classList.add('hidden'); deleteAccount(p); } }, 'Видалити акаунт'));
   acts.append(el('button', { class: 'btn', onclick: () => $('ucard').classList.add('hidden') }, 'Закрити'));
@@ -759,6 +800,11 @@ async function openUserCard(u) {
     p.contacts ? el('div', { class: 'sub' }, '✉️ ' + p.contacts) : null,
     el('div', { class: 'cards', style: 'margin-top:14px' },
       stat('Фото', s.photos), stat('Перегляди', s.views), stat('Рейтинг', rating), stat('Коментарі', s.comments), stat('Міста', s.cities)),
+    warnsOk ? el('h4', null, '⚠ Варни (' + userWarns.filter(w => !w.revoked).length + '/' + WARN_LIMIT + ')') : null,
+    warnsOk ? (userWarns.length ? userWarns.map(w => el('div', { class: 'cmt', style: w.revoked ? 'opacity:.5' : '' },
+      el('span', { class: 'sub' }, fmtDate(w.created_at) + ' · ' + (w.issued_by_name || '?') + ' · '), (w.revoked ? '[знято] ' : '') + w.reason,
+      !w.revoked && canManage(p) ? [' ', el('button', { class: 'btn small', onclick: () => { $('ucard').classList.add('hidden'); revokeWarn(w); } }, 'зняти')] : null))
+      : el('div', { class: 'sub' }, 'Варнів немає')) : null,
     el('h4', null, 'Останні фото'),
     photos.length ? el('div', { class: 'thumbs' }, ...photos.map(x => el('img', {
       class: 'thumb' + (x.status === 'pending' ? ' pending' : ''), src: phUrl(x), loading: 'lazy', alt: '',
@@ -1736,6 +1782,181 @@ async function pgBroadcast(tok) {
   show(
     el('div', { class: 'panel' }, el('h3', null, '📣 Оголошення всім'), el('div', { class: 'form' }, text, msg, el('div', null, sendAll))),
     el('div', { class: 'panel' }, el('h3', null, '✉️ Повідомлення одному користувачу'), el('div', { class: 'form' }, nick, text2, msg2, el('div', null, sendOne))));
+}
+
+
+/* ============================ НОВИНИ ============================ */
+const newsImgUrl = p => db.storage.from('news').getPublicUrl(p).data.publicUrl;
+async function newsResize(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const k = Math.min(1, 1400 / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+  const cx = cv.getContext('2d');
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(bmp, 0, 0, cv.width, cv.height);
+  return await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.86));
+}
+
+async function pgNews(tok) {
+  const { data, error } = await db.from('news').select('*').order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(200);
+  if (stale(tok)) return;
+  if (error) {
+    show(el('div', { class: 'panel' }, el('div', { class: 'pad err' }, 'Новини недоступні: ' + error.message + '. Запустіть news.sql у Supabase (SQL Editor).')));
+    return;
+  }
+  const rows = data || [];
+
+  let editing = null;            // null = нова
+  let img = null;                // { path } | { blob } | null
+  let imgRemoved = false;
+  const title = el('input', { class: 'input', maxlength: 160, placeholder: 'Заголовок' });
+  const body = el('textarea', { class: 'input', rows: 7, maxlength: 8000, placeholder: 'Текст новини (посилання https://… стануть клікабельними)' });
+  const pinned = el('input', { type: 'checkbox' });
+  const notifyAll = el('input', { type: 'checkbox' });
+  const file = el('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', hidden: true });
+  const prev = el('img', { class: 'thumb hidden', style: 'width:160px;height:110px;cursor:default', alt: '' });
+  const imgBtn = el('button', { class: 'btn small', type: 'button' }, '🖼 Додати картинку');
+  const imgDel = el('button', { class: 'btn small hidden', type: 'button' }, 'Прибрати картинку');
+  const msg = el('div', { class: 'err' });
+  const save = el('button', { class: 'btn primary', type: 'button' }, 'Опублікувати');
+  const cancel = el('button', { class: 'btn hidden', type: 'button' }, 'Скасувати редагування');
+  const head = el('h3', null, '📰 Нова новина');
+
+  function drawImg() {
+    let url = '';
+    if (img && img.blob) url = URL.createObjectURL(img.blob); else if (img && img.path) url = newsImgUrl(img.path);
+    prev.classList.toggle('hidden', !url); if (url) prev.src = url;
+    imgDel.classList.toggle('hidden', !url);
+    imgBtn.textContent = url ? '🖼 Замінити картинку' : '🖼 Додати картинку';
+  }
+  function reset() {
+    editing = null; img = null; imgRemoved = false;
+    title.value = ''; body.value = ''; pinned.checked = false; notifyAll.checked = false;
+    notifyAll.parentElement.classList.remove('hidden');
+    save.textContent = 'Опублікувати'; cancel.classList.add('hidden'); head.textContent = '📰 Нова новина';
+    msg.textContent = ''; drawImg();
+  }
+  function edit(n) {
+    editing = n; img = n.image_path ? { path: n.image_path } : null; imgRemoved = false;
+    title.value = n.title; body.value = n.body; pinned.checked = !!n.pinned;
+    notifyAll.checked = false; notifyAll.parentElement.classList.add('hidden');
+    save.textContent = 'Зберегти зміни'; cancel.classList.remove('hidden'); head.textContent = '✎ Редагування новини';
+    msg.textContent = ''; drawImg(); window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  imgBtn.addEventListener('click', () => file.click());
+  imgDel.addEventListener('click', () => { img = null; imgRemoved = true; drawImg(); });
+  file.addEventListener('change', async () => {
+    const f = file.files[0]; file.value = '';
+    if (!f) return;
+    try { img = { blob: await newsResize(f) }; imgRemoved = false; drawImg(); } catch (e) { msg.textContent = 'Не вдалося прочитати картинку'; }
+  });
+  cancel.addEventListener('click', reset);
+
+  save.addEventListener('click', async () => {
+    msg.style.color = '';
+    const t = title.value.trim(), b = body.value.trim();
+    if (t.length < 2 || b.length < 2) { msg.textContent = 'Заповніть заголовок і текст'; return; }
+    save.disabled = true; msg.style.color = ''; msg.textContent = 'Збереження…';
+    try {
+      let path = editing ? editing.image_path : null;
+      if (img && img.blob) {
+        const np = me.id + '/' + Date.now() + '.jpg';
+        const up = await db.storage.from('news').upload(np, img.blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
+        if (up.error) throw up.error;
+        if (path) await db.storage.from('news').remove([path]);
+        path = np;
+      } else if (imgRemoved && path) {
+        await db.storage.from('news').remove([path]); path = null;
+      }
+      const row = { title: t, body: b, pinned: pinned.checked, image_path: path };
+      const r = editing
+        ? await db.from('news').update(row).eq('id', editing.id)
+        : await db.from('news').insert({ ...row, author_id: me.id, author_name: me.name || null });
+      if (r.error) throw r.error;
+      if (!editing && notifyAll.checked) {
+        const ids = [];
+        for (let from = 0; ; from += 1000) {
+          const pr = await db.from('profiles').select('id').order('created_at').range(from, from + 999);
+          if (pr.error) throw pr.error;
+          ids.push(...pr.data.map(x => x.id));
+          if (pr.data.length < 1000) break;
+        }
+        for (let i = 0; i < ids.length; i += 500) {
+          const nr = await db.from('notifications').insert(ids.slice(i, i + 500).map(id => ({ user_id: id, message: '📰 Новина: ' + t })));
+          if (nr.error) throw nr.error;
+        }
+      }
+      await logAction(editing ? 'news_edit' : 'news_add', null, t);
+      toast(editing ? 'Новину оновлено' : 'Новину опубліковано');
+      pgNews(++renderTok);
+    } catch (e) {
+      msg.textContent = 'Помилка: ' + (e.message || e);
+      save.disabled = false;
+    }
+  });
+
+  const list = rows.map(n => el('div', { class: 'row' },
+    n.image_path ? el('img', { class: 'thumb', src: newsImgUrl(n.image_path), alt: '', onclick: () => openLightbox(newsImgUrl(n.image_path)) }) : null,
+    el('div', { class: 'info' },
+      el('p', null, el('b', null, (n.pinned ? '📌 ' : '') + n.title)),
+      el('p', { class: 'sub' }, (n.body.length > 160 ? n.body.slice(0, 160) + '…' : n.body)),
+      el('p', { class: 'sub' }, fmtDate(n.created_at) + (n.author_name ? ' · ' + n.author_name : ''))),
+    el('div', { class: 'acts' },
+      el('button', { class: 'btn small', type: 'button', onclick: () => edit(n) }, 'Редагувати'),
+      el('button', { class: 'btn small', type: 'button', onclick: async () => {
+        const r = await db.from('news').update({ pinned: !n.pinned }).eq('id', n.id);
+        if (r.error) { toast(r.error.message, 'err'); return; }
+        pgNews(++renderTok);
+      } }, n.pinned ? 'Відкріпити' : 'Закріпити'),
+      el('button', { class: 'btn small danger', type: 'button', onclick: async () => {
+        if (!(await askConfirm('Видалити новину?', n.title, 'Видалити', true))) return;
+        const r = await db.from('news').delete().eq('id', n.id);
+        if (r.error) { toast(r.error.message, 'err'); return; }
+        if (n.image_path) await db.storage.from('news').remove([n.image_path]);
+        await logAction('news_delete', null, n.title);
+        toast('Новину видалено');
+        pgNews(++renderTok);
+      } }, 'Видалити'))));
+
+  show(
+    el('div', { class: 'panel' }, head, el('div', { class: 'form' },
+      title, body,
+      el('label', null, pinned, ' 📌 Закріпити зверху'),
+      el('label', null, notifyAll, ' 🔔 Надіслати сповіщення всім користувачам'),
+      el('div', null, imgBtn, ' ', imgDel, file), prev, msg,
+      el('div', null, save, ' ', cancel))),
+    el('div', { class: 'panel' }, el('h3', null, 'Опубліковані новини · ' + rows.length),
+      rows.length ? list : el('div', { class: 'pad sub' }, 'Новин ще немає')));
+}
+
+
+/* ============================ ВАРНИ ============================ */
+const warnsState = { tab: 'active' };
+async function pgWarns(tok) {
+  let q = db.from('user_warns').select('*').order('created_at', { ascending: false }).limit(300);
+  if (warnsState.tab === 'active') q = q.eq('revoked', false); else if (warnsState.tab === 'revoked') q = q.eq('revoked', true);
+  const { data, error } = await q;
+  if (stale(tok)) return;
+  if (error) { show(el('div', { class: 'panel' }, el('div', { class: 'pad err' }, 'Варни недоступні: ' + error.message + '. Запустіть warns_schemes.sql у Supabase (SQL Editor).'))); return; }
+  const rows = data || [];
+  const users = await usersMap(rows.map(w => w.user_id));
+  if (stale(tok)) return;
+  const perUser = {};
+  rows.filter(w => !w.revoked).forEach(w => { perUser[w.user_id] = (perUser[w.user_id] || 0) + 1; });
+  const tabs = el('div', { class: 'toolbar' }, ...[['active', 'Активні'], ['revoked', 'Зняті'], ['all', 'Усі']].map(([k, l]) =>
+    el('button', { class: 'btn' + (warnsState.tab === k ? ' primary' : ''), type: 'button', onclick: () => { warnsState.tab = k; pgWarns(++renderTok); } }, l)));
+  const list = rows.map(w => {
+    const u = users[w.user_id];
+    return el('div', { class: 'row', style: w.revoked ? 'opacity:.55' : '' },
+      el('div', { class: 'info' },
+        el('p', null, u ? userLink(w.user_id, u.username) : '—',
+          !w.revoked ? el('span', { class: 'tag', style: 'background:rgba(217,119,6,.18);color:var(--warn)' }, '⚠ ' + (perUser[w.user_id] || 0) + '/' + WARN_LIMIT) : el('span', { class: 'tag' }, 'знято'),
+          u && u.banned ? el('span', { class: 'tag ban' }, 'БАН') : null),
+        el('p', { class: 'sub' }, w.reason),
+        el('p', { class: 'sub' }, fmtDate(w.created_at) + ' · видав: ' + (w.issued_by_name || '?') + (w.revoked_at ? ' · знято ' + fmtDate(w.revoked_at) : ''))),
+      el('div', { class: 'acts' }, !w.revoked ? el('button', { class: 'btn small', type: 'button', onclick: () => revokeWarn(w, () => pgWarns(++renderTok)) }, 'Зняти варн') : null));
+  });
+  show(tabs, el('div', { class: 'panel' }, el('h3', null, 'Ліміт: ' + WARN_LIMIT + ' активних варни = автобан'), list.length ? list : el('div', { class: 'empty' }, 'Варнів немає')));
 }
 
 /* ============================ ЖУРНАЛ ============================ */
